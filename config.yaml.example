@@ -1,0 +1,53 @@
+# ArXiv to reMarkable - Configuration Example
+# Copy this file to ~/.arxiv2rm/config.yaml and customize
+
+output:
+  format: "epub"  # EPUB 3.0 for reflowable content
+  directory: "~/Downloads/arxiv2rm"  # Output directory
+
+typography:
+  font_family: "OpenDyslexic"  # Embedded in EPUB
+  default_font_size: 16  # Recommendation (user adjustable on device)
+  line_height: 1.5
+
+layout:
+  margins:
+    top: "2em"
+    bottom: "2em"
+    left: "1.5em"
+    right: "1.5em"
+  single_column: true
+
+images:
+  max_width: 1404  # reMarkable 1 width
+  max_height: 1872  # reMarkable 1 height
+  optimize_for_eink: true
+  quality: 85  # JPEG quality (1-100)
+  dithering: false  # Optional Floyd-Steinberg dithering
+
+ocr:
+  engine: "groq"  # Groq Vision API (Llama 4)
+  groq_api_key: "${GROQ_API_KEY}"  # From environment variable
+  fallback: "tesseract"
+  language: "eng"
+  cache_enabled: true
+  cache_dir: "~/.arxiv2rm/cache/ocr"
+
+remarkable:
+  method: "rmapi"  # or "cloud"
+  default_folder: "Research"
+  cloud_token: "${REMARKABLE_TOKEN}"  # Optional, for cloud sync
+  auto_upload: false  # Set to true to upload automatically
+
+arxiv:
+  prefer_latex: true  # Download LaTeX source when available
+  cache_dir: "~/.arxiv2rm/cache/arxiv"
+
+pdf:
+  dpi: 150  # DPI for PDF to image conversion (for OCR)
+
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  file: "~/.arxiv2rm/logs/arxiv2rm.log"
+  max_size: "10MB"
+  backup_count: 5
