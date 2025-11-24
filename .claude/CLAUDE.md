@@ -1,79 +1,228 @@
-# ArXiv to reMarkable Converter
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
-Tool to convert scientific papers (ArXiv, IEEE, etc.) into reMarkable-optimized PDFs with enhanced readability and annotation capabilities.
 
-## Core Objectives
-- Convert scientific papers to reMarkable-friendly format
-- Use OCR (DeepSync OCR preferred) for text extraction
-- Apply OpenDyslexic font for improved readability
-- Increase font size for comfortable reading on e-ink display
-- Add annotation zones for note-taking
-- Push converted files directly to reMarkable device
+ArXiv to reMarkable converter - transforms scientific papers (ArXiv, IEEE, PDFs) into EPUB format optimized for reMarkable e-ink tablets with enhanced readability features (OpenDyslexic font, OCR via Groq Vision API).
 
-## Technology Stack
-- **OCR Engine**: Groq Vision API (Llama 4 Scout, Llama 3.2 Vision) via Deepseek-OCR
-- **PDF Processing**: PyMuPDF (fitz), PDFPlumber, or pdf2image
-- **Font**: OpenDyslexic (open-source dyslexia-friendly font)
-- **reMarkable Integration**: rmapi or rMsync for file transfer
-- **Language**: Python 3.9+
+## Development Commands
 
-## Groq API Configuration
-- **Vision Models**: Llama 4 Scout (meta-llama/llama-4-scout-17b-16e-instruct), Llama 3.2 Vision (llama-3.2-90b-vision-preview, llama-3.2-11b-vision-preview)
-- **API Endpoint**: https://api.groq.com/openai/v1/models
-- **Get Available Models**:
-  ```bash
-  curl -X GET "https://api.groq.com/openai/v1/models" \
-       -H "Authorization: Bearer $GROQ_API_KEY" \
-       -H "Content-Type: application/json"
-  ```
-- **Image Limits**: Max 20MB per request (URLs), 4MB (base64), 33 megapixels max resolution
-- **OCR Testing Results**: Groq Vision (Llama 4 Scout) significantly outperforms Tesseract on handwritten text (408 vs 168 chars extracted, meaningful vs gibberish)
+### Environment Setup
+```bash
+# Create and activate virtual environment
+python3 -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
-## Key Features
-1. **Multi-source support**: ArXiv, IEEE, PDF URLs, local PDFs
-2. **OCR processing**: Extract text from scanned/image-based PDFs
-3. **Layout optimization**:
-   - Larger font size (14-16pt minimum)
-   - OpenDyslexic typeface
-   - Single column layout
-   - Margins for annotations
-4. **Note-taking zones**: Dedicated areas for handwritten notes
-5. **Metadata preservation**: Author, title, publication info
-6. **Batch processing**: Convert multiple papers at once
-7. **Auto-sync**: Direct push to reMarkable cloud/device
+# Install package with dependencies
+pip install -e ".[dev]"          # Install with dev tools
+pip install -e ".[ocr]"          # Install with OCR capabilities
+pip install -e ".[dev,ocr]"      # Install everything
 
-## Project Structure
-```
-arxiv-to-remarkable/
-├── src/
-│   ├── converters/       # PDF conversion logic
-│   ├── ocr/             # OCR processing
-│   ├── formatters/      # Layout and typography
-│   ├── remarkable/      # reMarkable integration
-│   └── cli.py           # Command-line interface
-├── tests/
-├── config/
-│   ├── fonts/           # OpenDyslexic fonts
-│   └── templates/       # Page layout templates
-├── .env.template        # Configuration template
-└── requirements.txt
+# Install pre-commit hooks
+pre-commit install
 ```
 
-## Development Guidelines
-- Minimal dependencies
-- Configurable settings (font size, margins, OCR engine)
-- Progress indicators for long operations
-- Error handling for network/OCR failures
-- Cache OCR results to avoid reprocessing
+### Testing
+```bash
+# Run all tests
+pytest
 
-## Security
-- Never commit API keys or credentials
-- Use .env for reMarkable cloud tokens
-- Add .env to .gitignore
+# Run with coverage report
+pytest --cov
 
-## Quality Standards
-- Test with various paper formats (2-column, single-column, scanned)
-- Verify OCR accuracy on mathematical formulas
-- Validate output on actual reMarkable device
-- Benchmark conversion speed
+# Run specific test file
+pytest tests/test_config.py
+
+# Run specific test function
+pytest tests/test_cli.py::test_convert_command -v
+```
+
+### Code Quality
+```bash
+# Format code (auto-fix)
+black src/ tests/
+isort src/ tests/
+
+# Lint code
+flake8 src/ tests/
+
+# Type checking
+mypy src/
+
+# Run all pre-commit hooks manually
+pre-commit run --all-files
+```
+
+### CLI Usage
+```bash
+# Configure environment
+cp .env.template .env
+# Edit .env and add GROQ_API_KEY
+
+# Main CLI commands
+arxiv2rm convert <url_or_path>              # Convert paper to EPUB
+arxiv2rm convert paper.pdf -o output.epub   # Specify output
+arxiv2rm batch papers.txt --parallel 3      # Batch processing
+arxiv2rm config --show                      # View configuration
+arxiv2rm config --init                      # Create config file
+arxiv2rm config --path                      # Show config location
+
+# Handwriting detection CLI
+arxiv2rm-detect <image_path>                # Detect handwriting in image
+```
+
+## Code Architecture
+
+### Package Structure
+- **src/arxiv2rm/**: Main package directory
+  - `cli.py`: Click-based CLI interface with `convert`, `batch`, and `config` commands
+  - `cli_detect.py`: Handwriting detection CLI entry point
+  - `config.py`: Pydantic-based configuration management with YAML and .env support
+  - `handwriting_detector.py`: Multi-strategy handwriting detection (edge density, stroke variance, line straightness)
+  - `pdf_parser.py`: PDF processing logic
+
+### Configuration System
+
+The project uses a **three-tier configuration approach**:
+
+1. **Default values**: Hardcoded in Pydantic models (src/arxiv2rm/config.py)
+2. **YAML config**: User config at `~/.arxiv2rm/config.yaml` (created via `arxiv2rm config --init`)
+3. **Environment variables**: Loaded from `.env` file (use `.env.template` as starting point)
+
+Key config sections:
+- `TypographyConfig`: Font settings (OpenDyslexic, size 14-16pt)
+- `ImageConfig`: reMarkable-optimized dimensions (1404×1872px)
+- `OCRConfig`: Groq Vision API or Tesseract, with caching
+- `RemarkableConfig`: rmapi integration settings
+- `LoggingConfig`: Log levels and file locations
+
+**IMPORTANT**: The `ConfigLoader` class handles:
+- Environment variable expansion in YAML (`${VAR_NAME}` syntax)
+- Automatic injection of `GROQ_API_KEY` and `REMARKABLE_TOKEN` from environment
+- Validation of required keys (raises `ValueError` if Groq API key missing when `ocr.engine=groq`)
+
+### Handwriting Detection Architecture
+
+The `HandwritingDetector` class uses **5 strategies** with weighted scoring:
+
+1. **DeepSeek OCR confidence** (3x weight): Primary signal - low confidence indicates handwriting
+2. **Text quality analysis**: Detects fragmentation, gibberish, non-alphanumeric ratio
+3. **Edge density**: Measures irregularity using Canny edge detection
+4. **Stroke width variance**: Local variance analysis (handwriting = higher variance)
+5. **Line straightness**: Horizontal projection profile analysis with scipy peak detection
+
+Returns dict with:
+- `is_handwritten`: bool (classification result)
+- `confidence`: float 0-1 (aggregate score)
+- `reasons`: list of human-readable detection reasons
+- `recommendation`: "groq" or "local" (OCR engine to use)
+- `scores`: detailed breakdown of all strategy scores
+
+### Logging
+
+- **Rich-based console output**: Uses `rich.console.Console` and `rich.logging.RichHandler`
+- **File logging**: Logs written to `~/.arxiv2rm/logs/arxiv2rm.log`
+- **Log levels**: Configurable via `--log-level` CLI flag or `config.logging.level`
+
+### CLI Context Management
+
+The Click CLI uses `@click.pass_context` to share configuration across commands:
+- Config loaded once in main group command
+- Stored in `ctx.obj["config"]`
+- Commands merge CLI options with config defaults (CLI options take precedence)
+
+## Code Style and Standards
+
+### Formatting
+- **Line length**: 100 characters (Black + isort configured)
+- **Target Python**: 3.9-3.12 compatibility
+- **Import sorting**: isort with Black profile
+
+### Type Hints
+- **mypy configured** but not strict (`disallow_untyped_defs=false`)
+- Type checking enabled for untyped defs
+- Missing imports ignored for: `arxiv`, `ebooklib`, `TexSoup`, `piexif`
+
+### Pre-commit Hooks
+Enforces:
+- Trailing whitespace removal
+- End-of-file fixes
+- YAML/JSON/TOML validation
+- Large file prevention (>500KB)
+- Black formatting
+- isort import sorting
+- Flake8 linting (E203, W503 ignored for Black compatibility)
+
+## Key Dependencies
+
+### Core Libraries
+- **CLI**: `click` (commands), `rich` (output), `tqdm` (progress)
+- **Config**: `pydantic` (validation), `python-dotenv` (.env), `pyyaml` (config files)
+- **PDF**: `PyMuPDF` (fitz), `pdfplumber`
+- **Images**: `Pillow`, `piexif`
+- **EPUB**: `ebooklib`, `beautifulsoup4`, `lxml`
+- **HTTP**: `requests`, `httpx`
+- **ArXiv**: `arxiv` (official Python package)
+- **LaTeX**: `TexSoup`
+
+### OCR Dependencies (optional extra)
+- `pytesseract`: Tesseract OCR wrapper
+- `groq`: Groq Vision API client (Llama 4 Scout, Llama 3.2 Vision)
+- `opencv-python`: Image processing for handwriting detection
+- `scipy`: Signal processing for line detection
+
+## OCR Integration
+
+### Groq Vision API
+- **Preferred models**: Llama 4 Scout (`meta-llama/llama-4-scout-17b-16e-instruct`), Llama 3.2 Vision
+- **API endpoint**: `https://api.groq.com/openai/v1/models`
+- **Image limits**: 20MB (URL), 4MB (base64), 33 megapixels max
+- **Performance**: ~0.5s/page, significantly outperforms Tesseract on handwriting (408 vs 168 chars)
+
+### OCR Routing Strategy
+1. Run local OCR first (fast, free)
+2. Analyze confidence + image features with `HandwritingDetector`
+3. If handwriting detected (confidence < threshold), re-run with Groq Vision
+4. Cache OCR results to `~/.arxiv2rm/cache/ocr/` (configurable)
+
+## Environment Variables
+
+Required:
+- `GROQ_API_KEY`: Groq Vision API key (must start with `gsk_`)
+
+Optional:
+- `REMARKABLE_TOKEN`: reMarkable Cloud API token
+- `CONFIG_FILE`: Override config path (default: `~/.arxiv2rm/config.yaml`)
+
+## Testing
+
+### Test Structure
+- `tests/test_config.py`: Configuration loading and validation tests
+- `tests/test_cli.py`: CLI command tests
+
+### Coverage Configuration
+- **Source**: `src/` directory
+- **Omit**: `tests/*`, `*/test_*.py`
+- **Excluded lines**: pragma, `__repr__`, `__main__`, TYPE_CHECKING, abstractmethod
+- **Reports**: terminal, HTML (`htmlcov/`), XML
+
+## Known Limitations
+
+- **Phase 1 MVP status**: Core conversion pipeline not yet implemented
+- **CLI commands**: `convert` and `batch` currently return "not yet implemented" warnings
+- **reMarkable upload**: Integration pending (rmapi or cloud API)
+- **EPUB generation**: Core EPUB builder not yet implemented
+
+## Documentation References
+
+- [PRD.md](../PRD.md): Product Requirements Document
+- [TASKS.md](../TASKS.md): Detailed task breakdown
+- [GITHUB_ISSUES_SUMMARY.md](../GITHUB_ISSUES_SUMMARY.md): Issue roadmap
+- [docs/GROQ_OCR_INTEGRATION.md](../docs/GROQ_OCR_INTEGRATION.md): Groq OCR integration guide
+- [docs/automated_ocr_routing.md](../docs/automated_ocr_routing.md): Handwriting detection architecture
+
+## reMarkable Device Specs
+
+- **reMarkable 1**: 1404×1872px (e-ink display)
+- **Optimization targets**: High contrast for e-ink, JPEG quality 85, dithering optional
