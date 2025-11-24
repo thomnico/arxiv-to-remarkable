@@ -1,0 +1,53 @@
+[
+  {
+    "file": "exemples/handwritten/Newsletter - page 1.png",
+    "file_size_kb": 203.8564453125,
+    "ocr_results": {
+      "groq_deepseek": {
+        "text": "Here is the text extracted from the image:\n\n\n- Encore une mareleter cyfer?\n\n- Pour les dirigeants et d\u00e9cideurs non techniques -\n\n- Pas de jargon, pas de solutions magiques; un \u00e9change direct dans futures sur le r\u00f4le et les attentes d'un dirigeants\n\nen mati\u00e8re de cybers\u00e9curit\u00e9 -\n\n- Devient dirigeant en criant Inutile. Il me l'apercyois que le discours propos\u00e9 aux dirigeants \n  Intro ... Pourqoi \n  Pour qui",
+        "time": 1.5402021408081055,
+        "error": null,
+        "tokens": 2026
+      },
+      "tesseract": {
+        "text": "- Emerg pre modofin cn:\n~ Pour ho Mriggend s at\ndickens mo Rohn goneo _\nDing pomknso ran Ce note\n\nOm Mnkeare de oferarorrke\u201d -\nSaber UR fe mr!\n\nVo Lprnr!\u2019 or goes\n\nCxS\n",
+        "time": 0.3278939723968506,
+        "error": null
+      }
+    }
+  },
+  {
+    "file": "exemples/handwritten/Newsletter - page 2.png",
+    "file_size_kb": 152.9658203125,
+    "ocr_results": {
+      "groq_deepseek": {
+        "text": "Here is the transcription of the handwritten text in the image:\n\n\nn'est pas optimal , Trop de\nTechnique et complexit\u00e9 - peur faire\ncrire \u00e0 \"l'outil magique\"\n\nLa cylex m'est pas une\nbagucte magique -\nFoy patte image -\n\n- Pourquoi ?\nLes donn\u00e9es infand gres\nsont morte entreprise .\n(derloquer )\nElavi pedrent\n\n\n# 1",
+        "time": 1.125443935394287,
+        "error": null,
+        "tokens": 2016
+      },
+      "tesseract": {
+        "text": "nol ger Shine , Tiap ae\nNeus of Conafaths pests fotr\nLa cyfen ODF) 4D UW\n|\nae een]\n\u2014 f\u00b0 _\nonly\nPOV frrke (Ze\n| Cabo) ae\n",
+        "time": 0.3101768493652344,
+        "error": null
+      }
+    }
+  },
+  {
+    "file": "exemples/handwritten/Newsletter - page 3.png",
+    "file_size_kb": 138.8330078125,
+    "ocr_results": {
+      "groq_deepseek": {
+        "text": "Here is the text extracted from the image:\n\n\nJe repete les choses SONT notre entreprise dont il faut s'en occuper -\n\n- La cylee c'est 30 % d'audre\n\n- Pas de noues dep de mille, not au mins des entondues gonfieres -\n\n- C'est ddt des personnes des prouves et des outils\n\n\n#1",
+        "time": 0.5704009532928467,
+        "error": null,
+        "tokens": 2007
+      },
+      "tesseract": {
+        "text": "Te\n= pale\njae: owt\n4 yf ;\n~ (te, oe\nOn\nfe ton\nfer\na cate .\nAA\u2019L\n",
+        "time": 0.27921009063720703,
+        "error": null
+      }
+    }
+  }
+]
