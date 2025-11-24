@@ -18,7 +18,7 @@ Scientific papers are often poorly formatted for e-ink devices:
 An automated pipeline that:
 1. Use a PDF backlog or fetch papers from multiple sources
 2. If ArXiv, prefer the source LaTeX and images
-3. Extract text from PDF via OCR when needed (Groq Vision)
+3. Extract text from PDF via OCR when needed (Deepseek-OCR)
 4. Detect images and annotate them with EXIF data
 5. Reformat content as reflowable EPUB with readable typography (OpenDyslexic font)
 6. Generate EPUB with flexible pagination (adapts to user font size preferences)
@@ -82,18 +82,29 @@ An automated pipeline that:
 | Generic URL | P2 | Any publicly accessible PDF |
 
 ### 4.2 OCR Processing
-- **Primary Engine**: DeepSync OCR using Groq access/API
+- **OCR Engine**: Deepseek-OCR via Groq API (Primary)
   - Superior handling of mathematical notation
-  - Multi-language support
-  - Cloud API or local deployment
+  - High accuracy for scientific papers
+  - Fast processing through Groq's infrastructure
+  - **No fallback engines** - single, focused approach
+- **Local OCR Option**: deepseek-ocr.rs (Rust implementation)
+  - **GitHub**: [TimmyOVO/deepseek-ocr.rs](https://github.com/TimmyOVO/deepseek-ocr.rs)
+  - Native Metal GPU acceleration on Mac M1/M2/M3/M4
+  - Performance: 40-50 tokens/s with Metal GPU (vs 12 tok/s CPU-only)
+  - Optimized for Apple Silicon with FP16 execution
+  - Faster cold-start, lower memory footprint than Python version
+  - Zero Python dependencies - native Rust binary
+  - OpenAI-compatible HTTP server for easy integration
+  - Use cases: Offline processing, privacy-sensitive documents, batch processing
 - **Smart Detection**: Skip OCR if PDF already has text layer
 - **Formula Handling**: Preserve LaTeX or MathML when possible
+- **No Fallbacks**: If Deepseek-OCR fails, process ends with clear error message
 
 ### 4.3 Layout & Typography
 | Feature | Specification |
 |---------|---------------|
 | Output Format | EPUB 3.0 (reflowable, not fixed-layout) |
-| Font Family | OpenDyslexic (embedded), OpenSans (fallback) |
+| Font Family | OpenDyslexic (embedded) |
 | Font Size | User configurable on device (EPUB advantage) |
 | Default Font Size | 14-18pt recommended |
 | Line Height | 1.5x font size |
@@ -137,7 +148,7 @@ An automated pipeline that:
 
 ### 5.1 Performance
 - Conversion speed: <2 minutes for 20-page paper (excluding OCR)
-- OCR processing: <5 seconds per page (DeepSync OCR)
+- OCR processing: <5 seconds per page (Deepseek-OCR)
 - Memory usage: <500MB during conversion
 - Batch processing: 10+ papers without manual intervention
 
@@ -155,7 +166,7 @@ An automated pipeline that:
 
 ### 5.4 Security & Privacy
 - No data retention: Delete cached files after 24 hours
-- Local processing option (no cloud OCR)
+- OCR via Groq API with optional local execution
 - Encrypted storage of reMarkable credentials
 - No telemetry without user consent
 
@@ -190,7 +201,7 @@ An automated pipeline that:
          │             │
 ┌────────▼────────┐    │
 │  OCR Engine     │    │
-│  (Groq Vision)  │────┤
+│ (Deepseek-OCR)  │────┤
 └─────────────────┘    │
          │             │
          └─────┬───────┘
@@ -216,8 +227,7 @@ An automated pipeline that:
 | Layer | Technology | Rationale |
 |-------|------------|-----------|
 | Language | Python 3.9+ | Rich ecosystem for PDF/OCR/EPUB |
-| OCR | Groq Vision API (Llama 4) | Ultra-fast, accurate (0.5s/page, 100% accuracy) |
-| OCR (Fallback) | Tesseract 5.0 | Offline, open-source |
+| OCR | Deepseek-OCR via Groq API | Math notation support, fast inference |
 | PDF Input | PyMuPDF (fitz) | Fast, reliable parsing |
 | EPUB Output | ebooklib | EPUB 3.0 generation |
 | HTML/CSS | BeautifulSoup4 | Content structuring |
@@ -238,9 +248,9 @@ An automated pipeline that:
    - PDF with text: Use PyMuPDF to extract text
    - Scanned PDF: Convert pages to images (150 DPI)
 4. **OCR** (if needed):
-   - Resize images to optimize for Groq API (<4MB)
-   - Submit to Groq Vision API (Llama 4 Scout)
-   - Extract structured text (0.5s per page)
+   - Prepare images for Deepseek-OCR processing
+   - Submit to Deepseek-OCR via Groq API
+   - Extract structured text (fast inference)
 5. **Image Processing**:
    - Extract figures/diagrams from PDF or LaTeX
    - Resize to reMarkable 1 resolution (1404×1872px)
@@ -269,25 +279,25 @@ An automated pipeline that:
 **Acceptance Criteria**:
 - CLI accepts ArXiv URLs in format `https://arxiv.org/abs/YYMM.NNNNN`
 - Downloads LaTeX source when available (faster, better quality)
-- Falls back to PDF + OCR if LaTeX unavailable
+- Uses PDF + OCR if LaTeX unavailable
 - Generates EPUB 3.0 with embedded OpenDyslexic font
 - Images optimized for reMarkable 1 (1404×1872px)
 - Uploads to reMarkable "Research" folder
 - Completes in <3 minutes for 20-page paper
 - User can adjust font size on device without pagination issues
 
-#### Story 2: OCR Scanned Paper
+#### Story 2: OCR Scanned Paper (Deepseek-OCR via Groq)
 **As a** student
 **I want to** convert a scanned PDF with no text layer
 **So that** I can search and copy text on reMarkable
 
 **Acceptance Criteria**:
 - Detects missing text layer automatically
-- Runs OCR using Groq Vision API (Llama 4)
+- Runs OCR using Deepseek-OCR via Groq API
 - Achieves >95% accuracy on standard text
 - Preserves mathematical notation
 - Searchable EPUB output with reflowable text
-- Shows progress bar during OCR (0.5s per page)
+- Shows progress bar during OCR processing
 - Images resized to 1404×1872px for optimal display
 
 #### Story 3: Batch Convert Papers
@@ -344,7 +354,7 @@ $ arxiv2rm batch papers.txt --parallel 3
 Processing 10 papers...
 [1/10] arxiv:2301.12345 ✓
 [2/10] arxiv:2302.67890 ✓
-[3/10] local/paper.pdf ⚠ OCR failed, using fallback
+[3/10] local/paper.pdf ⚠ OCR failed (Deepseek-OCR unavailable)
 ...
 Summary: 9 succeeded, 1 warning, 0 failed
 
@@ -381,10 +391,10 @@ images:
   quality: 85  # JPEG quality (1-100)
 
 ocr:
-  engine: "groq"  # Groq Vision API (Llama 4)
+  engine: "deepseek"  # Deepseek-OCR via Groq API
   groq_api_key: ${GROQ_API_KEY}
-  fallback: "tesseract"
   language: "eng"
+  local_mode: false  # Set to true for local Mac M1 execution
 
 remarkable:
   method: "rmapi"  # or "cloud"
@@ -401,7 +411,7 @@ remarkable:
 
 **Features**:
 - ArXiv URL support (LaTeX source preferred)
-- ArXiv PDF fallback with text extraction
+- ArXiv PDF with text extraction
 - Image extraction and optimization (1404×1872px)
 - EPUB 3.0 generation with OpenDyslexic font
 - Reflowable layout (single column)
@@ -419,8 +429,7 @@ remarkable:
 **Goal**: Handle scanned papers and user preferences
 
 **Features**:
-- Groq Vision OCR integration (Llama 4)
-- Tesseract fallback
+- Deepseek-OCR integration for scanned PDFs
 - Configurable EPUB styling (CSS)
 - Image quality/size optimization levels
 - Batch processing
@@ -428,7 +437,7 @@ remarkable:
 - Error handling & retry logic
 
 **Deliverables**:
-- Groq OCR pipeline (0.5s per page)
+- Deepseek-OCR pipeline (fast processing)
 - Config file support
 - Batch mode
 - Image optimizer with e-ink presets
@@ -460,17 +469,17 @@ remarkable:
 ## 10. Open Questions & Risks
 
 ### Open Questions
-1. **Groq Vision API pricing**: Current costs per page? Free tier limits?
+1. **Deepseek-OCR API**: Pricing model? Rate limits?
 2. **reMarkable EPUB support**: Full EPUB 3.0 compatibility on reMarkable 1/2?
 3. **Formula preservation**: MathML in EPUB vs images for mathematical notation?
-4. **Batch size**: How many papers can typical user convert before hitting Groq rate limits?
+4. **Batch size**: How many papers can typical user convert in one session?
 5. **LaTeX parsing**: Which Python library for .tex parsing (TexSoup, PyLaTeX)?
 
 ### Risks & Mitigations
 | Risk | Impact | Probability | Mitigation |
 |------|--------|-------------|------------|
-| Groq Vision API unavailable | High | Medium | Implement Tesseract fallback |
-| reMarkable EPUB rendering issues | High | Medium | Test extensively, provide PDF fallback option |
+| Deepseek-OCR API unavailable | High | Medium | Fail gracefully with clear error message |
+| reMarkable EPUB rendering issues | High | Medium | Test extensively with sample papers |
 | Poor OCR accuracy on formulas | Medium | High | Preserve formula images in EPUB |
 | EPUB file size too large | Medium | Medium | Optimize images aggressively, use adaptive quality |
 | LaTeX parsing failures | Medium | Medium | Fallback to PDF extraction |
@@ -505,7 +514,7 @@ remarkable:
 | reMarkable native | Seamless sync | No preprocessing, small fonts, fixed PDF layout |
 | k2pdfopt | Reflow PDFs | Outdated, no EPUB output, complex setup |
 
-**Differentiation**: Only tool specifically designed for scientific papers + reMarkable + EPUB (reflowable) + Groq OCR + dyslexia-friendly typography + image optimization for e-ink.
+**Differentiation**: Only tool specifically designed for scientific papers + reMarkable + EPUB (reflowable) + Deepseek-OCR + dyslexia-friendly typography + image optimization for e-ink.
 
 ### B. Font Licensing
 - **OpenDyslexic**: Open Font License (OFL), free for commercial use
@@ -525,12 +534,12 @@ remarkable:
 ### D. OCR Comparison
 | Engine | Accuracy | Speed | Cost | Math Support |
 |--------|----------|-------|------|--------------|
-| Groq Vision (Llama 4) | 98-100% | 0.5s/page | Check groq.com/pricing | Excellent |
-| Tesseract | 92% | 1-3s/page | Free | Fair |
+| Deepseek-OCR | High | Fast | TBD | Excellent |
 | Google Cloud Vision | 97% | 1-2s/page | $1.50/1000 pages | Good |
 | AWS Textract | 96% | 1-2s/page | $1.50/1000 pages | Good |
+| Tesseract | 92% | 1-3s/page | Free | Fair |
 
-**Recommendation**: Groq Vision API (primary, ultra-fast) + Tesseract (offline fallback)
+**Recommendation**: Deepseek-OCR (single, focused solution - no fallback)
 
 ---
 
@@ -539,7 +548,7 @@ remarkable:
 ### Launch Criteria
 - [ ] Convert 50 test papers to EPUB with >90% success rate
 - [ ] EPUB validates against EPUB 3.0 standard
-- [ ] OCR accuracy >95% on 20 sample papers (Groq Vision)
+- [ ] OCR accuracy >95% on 20 sample papers (Deepseek-OCR)
 - [ ] Average conversion time <2 min (20-page paper)
 - [ ] Images optimized correctly (1404×1872px, <500KB each)
 - [ ] EPUBs display correctly on reMarkable 1
