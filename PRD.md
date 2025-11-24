@@ -264,7 +264,7 @@ An automated pipeline that:
 #### Story 1: Convert ArXiv Paper
 **As a** researcher
 **I want to** paste an ArXiv URL and get a reMarkable-optimized EPUB
-**So that** I can read it comfortably with adjustable font size on my device
+**So that** I can read it comfortably with adjustable font size on my devic
 
 **Acceptance Criteria**:
 - CLI accepts ArXiv URLs in format `https://arxiv.org/abs/YYMM.NNNNN`
