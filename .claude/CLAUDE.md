@@ -12,11 +12,23 @@ Tool to convert scientific papers (ArXiv, IEEE, etc.) into reMarkable-optimized 
 - Push converted files directly to reMarkable device
 
 ## Technology Stack
-- **OCR Engine**: DeepSync OCR (primary), Tesseract (fallback)
+- **OCR Engine**: Groq Vision API (Llama 4 Scout, Llama 3.2 Vision) via Deepseek-OCR
 - **PDF Processing**: PyMuPDF (fitz), PDFPlumber, or pdf2image
 - **Font**: OpenDyslexic (open-source dyslexia-friendly font)
 - **reMarkable Integration**: rmapi or rMsync for file transfer
 - **Language**: Python 3.9+
+
+## Groq API Configuration
+- **Vision Models**: Llama 4 Scout (meta-llama/llama-4-scout-17b-16e-instruct), Llama 3.2 Vision (llama-3.2-90b-vision-preview, llama-3.2-11b-vision-preview)
+- **API Endpoint**: https://api.groq.com/openai/v1/models
+- **Get Available Models**:
+  ```bash
+  curl -X GET "https://api.groq.com/openai/v1/models" \
+       -H "Authorization: Bearer $GROQ_API_KEY" \
+       -H "Content-Type: application/json"
+  ```
+- **Image Limits**: Max 20MB per request (URLs), 4MB (base64), 33 megapixels max resolution
+- **OCR Testing Results**: Groq Vision (Llama 4 Scout) significantly outperforms Tesseract on handwritten text (408 vs 168 chars extracted, meaningful vs gibberish)
 
 ## Key Features
 1. **Multi-source support**: ArXiv, IEEE, PDF URLs, local PDFs

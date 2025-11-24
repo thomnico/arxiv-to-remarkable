@@ -74,10 +74,14 @@ dev = [
 
 ocr = [
     "pytesseract>=0.3.10",
+    "groq>=0.36.0",
+    "opencv-python>=4.12.0",
+    "scipy>=1.16.0",
 ]
 
 [project.scripts]
 arxiv2rm = "arxiv2rm.cli:main"
+arxiv2rm-detect = "arxiv2rm.cli_detect:main"
 
 [project.urls]
 Homepage = "https://github.com/thomnico/arxiv-to-remarkable"
