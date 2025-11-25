@@ -66,8 +66,6 @@ papers/
 # Demo output
 demo_output/
 
-# Example EPUBs (too large for git, will be uploaded to releases)
-examples/*.epub
 
 # reMarkable credentials
 .remarkable_token
