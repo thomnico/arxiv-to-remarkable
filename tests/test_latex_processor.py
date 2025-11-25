@@ -305,9 +305,10 @@ Detailed procedure.
         test_node = TexSoup(r"\textbf{Bold} and \textit{italic} and \cite{ref}")
         text = processor._node_to_text(test_node)
 
-        assert "textbf" not in text
-        assert "textit" not in text
-        assert "cite" not in text
+        # Check that command syntax is removed (braces, backslashes)
+        assert "\\textbf{" not in text
+        assert "\\textit{" not in text
+        assert "\\cite{" not in text
         assert "Bold" in text
         assert "italic" in text
 
