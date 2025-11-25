@@ -293,6 +293,11 @@ class EPUBBuilder:
             ]
 
             for idx, figure in chapter_figures:
+                # Skip PDF figures - they can't be optimized by PIL
+                if figure.image_path and figure.image_path.endswith(".pdf"):
+                    logger.debug(f"Skipping PDF figure {figure.number}: {figure.image_path}")
+                    continue
+
                 # Determine image filename from figure's image_path
                 # Extract just the filename without extension and sanitize
                 if figure.image_path:

@@ -102,7 +102,15 @@ def demo_epub_generation(paper_id: str = "1706.03762", output_dir: Path = None):
         source_url=metadata.get("pdf_url"),
     )
 
-    epub_path = output_dir / f"{paper_id.replace('/', '_')}.epub"
+    # Generate filename: sanitized title + arxiv ID
+    title = latex_doc.title or metadata["title"]
+    # Sanitize title: lowercase, replace spaces/special chars with hyphens, truncate
+    safe_title = "".join(c if c.isalnum() or c in [" ", "-"] else "" for c in title)
+    safe_title = "-".join(safe_title.lower().split())[:50]  # Max 50 chars
+    safe_paper_id = paper_id.replace("/", "_").replace(".", "_")
+
+    epub_filename = f"{safe_title}-{safe_paper_id}.epub"
+    epub_path = output_dir / epub_filename
     builder = EPUBBuilder(epub_metadata, epub_path)
     builder.build_from_latex(latex_doc)
 
