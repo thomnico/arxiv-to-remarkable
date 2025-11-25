@@ -33,6 +33,8 @@ class Section:
     title: str
     number: Optional[str] = None
     content: str = ""
+    figure_refs: List[str] = field(default_factory=list)  # Ordered list of figure labels
+    table_refs: List[str] = field(default_factory=list)  # Ordered list of table labels
 
 
 @dataclass
@@ -224,7 +226,15 @@ class LaTeXProcessor:
             try:
                 title = self._node_to_text(section_node.args[0])
                 content = self._extract_section_content(section_node)
-                section = Section(level=1, title=title, content=content)
+                # Extract figure/table references from content
+                figure_refs, table_refs = self._extract_references_from_content(content)
+                section = Section(
+                    level=1,
+                    title=title,
+                    content=content,
+                    figure_refs=figure_refs,
+                    table_refs=table_refs,
+                )
                 doc.sections.append(section)
                 logger.debug(f"Extracted section: {title[:30]}...")
 
@@ -259,6 +269,12 @@ class LaTeXProcessor:
                                 clean_content = self._node_to_text(input_soup)
                                 if clean_content.strip():
                                     section.content += "\n\n" + clean_content
+                                    # Re-extract references after adding content
+                                    fig_refs, tab_refs = self._extract_references_from_content(
+                                        section.content
+                                    )
+                                    section.figure_refs = fig_refs
+                                    section.table_refs = tab_refs
                                     logger.debug(f"Added {len(clean_content)} chars to {title}")
 
             except Exception as e:
@@ -317,6 +333,12 @@ class LaTeXProcessor:
                                 for section in reversed(doc.sections):
                                     if section.level == 1:
                                         section.content += "\n\n" + clean_content
+                                        # Re-extract references after adding content
+                                        fig_refs, tab_refs = self._extract_references_from_content(
+                                            section.content
+                                        )
+                                        section.figure_refs = fig_refs
+                                        section.table_refs = tab_refs
                                         logger.debug(
                                             f"Added {len(clean_content)} chars to {section.title}"
                                         )
@@ -394,7 +416,16 @@ class LaTeXProcessor:
             raw_content = raw_text[content_start:content_end]
             clean_content = self._node_to_text(TexSoup(raw_content))
 
-            section = Section(level=level, title=title, content=clean_content)
+            # Extract figure/table references from content
+            figure_refs, table_refs = self._extract_references_from_content(clean_content)
+
+            section = Section(
+                level=level,
+                title=title,
+                content=clean_content,
+                figure_refs=figure_refs,
+                table_refs=table_refs,
+            )
             doc.sections.append(section)
             section_type = "subsection" if level == 2 else "subsubsection"
             logger.debug(
@@ -805,7 +836,8 @@ class LaTeXProcessor:
         text = re.sub(r"\\textit\{([^}]+)\}", r"\1", text)
         text = re.sub(r"\\emph\{([^}]+)\}", r"\1", text)
         text = re.sub(r"\\cite[a-z]*\{[^}]+\}", "", text)  # \cite, \citep, \citet
-        text = re.sub(r"\\ref\{[^}]+\}", "", text)
+        # PRESERVE REFERENCES: Replace \ref{label} with marker instead of removing
+        text = re.sub(r"\\ref\{([^}]+)\}", r"<<<REF:\1>>>", text)
         text = re.sub(r"\\label\{[^}]+\}", "", text)
         text = re.sub(r"\\thanks\{[^}]+\}", "", text)  # Remove footnotes
 
@@ -814,9 +846,11 @@ class LaTeXProcessor:
             r"\\begin\{(table|tabular|center|minipage)\}.*?\\end\{\1\}", "", text, flags=re.DOTALL
         )
 
-        # Replace Figure~ with Figure (remove non-breaking space)
-        text = re.sub(r"Figure~\\ref\{[^}]+\}", "Figure", text)
+        # Replace Figure~/Table~ with marker-preserved versions
+        text = re.sub(r"Figure~<<<REF:([^>]+)>>>", r"<<<REF:\1>>>", text)
+        text = re.sub(r"Table~<<<REF:([^>]+)>>>", r"<<<REF:\1>>>", text)
         text = re.sub(r"Figure~", "Figure ", text)
+        text = re.sub(r"Table~", "Table ", text)
 
         # Remove author separators
         text = re.sub(r"\\AND\s+", ", ", text)
@@ -832,6 +866,31 @@ class LaTeXProcessor:
         text = re.sub(r"\s+", " ", text)
 
         return text.strip()
+
+    def _extract_references_from_content(self, content: str) -> tuple[List[str], List[str]]:
+        """
+        Extract figure and table references in order from content.
+
+        Args:
+            content: Text content with <<<REF:label>>> markers
+
+        Returns:
+            Tuple of (figure_refs, table_refs) - lists of labels in order of appearance
+        """
+        figure_refs = []
+        table_refs = []
+
+        # Find all <<<REF:...>>> markers in order
+        for match in re.finditer(r"<<<REF:([^>]+)>>>", content):
+            ref_label = match.group(1)
+            if ref_label.startswith("fig:"):
+                if ref_label not in figure_refs:  # Only first occurrence
+                    figure_refs.append(ref_label)
+            elif ref_label.startswith("tab:"):
+                if ref_label not in table_refs:  # Only first occurrence
+                    table_refs.append(ref_label)
+
+        return figure_refs, table_refs
 
     def _resolve_input_file(self, input_node: TexNode, current_file: Path) -> Optional[Path]:
         r"""
