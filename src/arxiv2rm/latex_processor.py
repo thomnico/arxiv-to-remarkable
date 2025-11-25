@@ -710,27 +710,42 @@ class LaTeXProcessor:
 
         html_rows = []
 
-        # Heuristic: First row(s) with fewer cells are often headers
-        # Or rows before the first \hline
-        for row_idx, row in enumerate(rows):
-            # Skip if row is empty after cleaning
+        # First pass: determine the maximum number of columns
+        max_cols = 0
+        parsed_rows = []
+        for row in rows:
             if not row.strip():
                 continue
+            cells = [c.strip() for c in row.split("&")]
+            # Keep empty cells to maintain column alignment
+            parsed_rows.append(cells)
+            max_cols = max(max_cols, len(cells))
 
-            # Split into cells (split on &)
-            cells = [c.strip() for c in row.split("&") if c.strip()]
-
-            # Skip rows with no cells
-            if not cells:
+        # Second pass: build HTML with proper column alignment
+        for row_idx, cells in enumerate(parsed_rows):
+            # Skip completely empty rows
+            if not any(c.strip() for c in cells):
                 continue
 
             # First non-empty row is typically header
             tag = "th" if row_idx < 2 else "td"  # First 2 rows are often headers
 
-            cell_html = "".join(f"<{tag}>{cell}</{tag}>" for cell in cells)
+            # Pad row to max_cols if needed
+            while len(cells) < max_cols:
+                cells.append("")
+
+            cell_html = "".join(
+                f"<{tag}>{cell if cell.strip() else '&nbsp;'}</{tag}>" for cell in cells
+            )
             html_rows.append(f"<tr>{cell_html}</tr>")
 
-        return f'<table>{"".join(html_rows)}</table>'
+        # Wrap in thead/tbody for better structure
+        if len(html_rows) > 2:
+            thead = "".join(html_rows[:2])
+            tbody = "".join(html_rows[2:])
+            return f"<table><thead>{thead}</thead><tbody>{tbody}</tbody></table>"
+        else:
+            return f'<table>{"".join(html_rows)}</table>'
 
     def _extract_section_content(self, section_node: TexNode) -> str:
         r"""

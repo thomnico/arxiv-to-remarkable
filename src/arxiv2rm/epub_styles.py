@@ -142,21 +142,54 @@ figcaption {
 
 /* Tables */
 table {
-    margin: 1em auto;
+    margin: 1.5em auto;
     border-collapse: collapse;
-    width: 90%;
+    width: 100%;
     page-break-inside: avoid;
+    font-size: 12pt;
+}
+
+thead {
+    border-bottom: 2px solid #000000;
+}
+
+tbody tr {
+    border-bottom: 1px solid #CCCCCC;
 }
 
 th, td {
-    border: 1px solid #000000;
-    padding: 0.5em;
+    padding: 0.6em 0.4em;
     text-align: left;
+    vertical-align: top;
 }
 
 th {
     font-weight: bold;
     background-color: #F0F0F0;
+    border-bottom: 2px solid #000000;
+    text-align: center;
+}
+
+td {
+    border-bottom: 1px solid #E0E0E0;
+}
+
+/* Center-align numeric cells */
+td:has(img) {
+    text-align: center;
+}
+
+/* Table container */
+.table-container {
+    margin: 2em 0;
+    page-break-inside: avoid;
+}
+
+.table-caption {
+    font-weight: bold;
+    text-align: center;
+    margin-bottom: 0.5em;
+    font-size: 13pt;
 }
 
 /* Code blocks */
