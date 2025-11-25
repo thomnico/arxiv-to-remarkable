@@ -111,6 +111,42 @@ def demo_epub_generation(paper_id: str = "1706.03762", output_dir: Path = None):
     builder.add_css(css_content)
     print("   ✓ Added CSS stylesheet")
 
+    # Add OpenDyslexic fonts
+    from os.path import expanduser
+
+    font_names = [
+        "OpenDyslexic-Regular.otf",
+        "OpenDyslexic-Bold.otf",
+        "OpenDyslexic-Italic.otf",
+        "OpenDyslexic-BoldItalic.otf",
+    ]
+
+    # Try to find fonts in system fonts directories
+    system_font_paths = [
+        Path(expanduser("~/Library/Fonts")),  # macOS user fonts
+        Path("/Library/Fonts"),  # macOS system fonts
+        Path("/System/Library/Fonts"),  # macOS system fonts
+    ]
+
+    # Embed fonts into EPUB directly from system
+    fonts_embedded = 0
+    for font_name in font_names:
+        # Search for font in system directories
+        for font_dir in system_font_paths:
+            font_path = font_dir / font_name
+            if font_path.exists():
+                try:
+                    builder.add_font(font_path, font_name)
+                    fonts_embedded += 1
+                    break
+                except Exception as e:
+                    print(f"   ⚠️  Could not embed {font_name}: {e}")
+
+    if fonts_embedded > 0:
+        print(f"   ✓ Embedded {fonts_embedded} OpenDyslexic font files")
+    else:
+        print("   ⚠️  No fonts embedded (will use fallback fonts)")
+
     # Add optimized images
     for img_path in optimized_images:
         builder.add_image(img_path, img_path.name)

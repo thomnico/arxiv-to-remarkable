@@ -313,6 +313,33 @@ class EPUBBuilder:
             </figure>
 """
 
+        # Add tables for this chapter (same filtering logic as figures)
+        if self.latex_doc and self.latex_doc.tables:
+            is_first_chapter = (
+                self.latex_doc.sections and main_section == self.latex_doc.sections[0]
+            )
+
+            chapter_tables = [
+                table
+                for table in self.latex_doc.tables
+                if table.source_section in chapter_section_titles
+                or (table.source_section is None and is_first_chapter)
+            ]
+
+            for table in chapter_tables:
+                from arxiv2rm.latex_processor import LaTeXProcessor
+
+                # Convert LaTeX tabular to HTML table
+                table_html = LaTeXProcessor.tabular_to_html(table.content)
+
+                caption_text = f": {self._escape_html(table.caption)}" if table.caption else ""
+                html += f"""
+            <div class="table-container" id="tab{table.number}">
+                <p class="table-caption">Table {table.number}{caption_text}</p>
+                {table_html}
+            </div>
+"""
+
         # Subsections
         for subsection in subsections:
             heading_level = min(subsection.level, 6)  # h2-h6 (h1 is chapter title)

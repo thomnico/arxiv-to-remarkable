@@ -46,6 +46,19 @@ class MathFormula:
 
 
 @dataclass
+class Table:
+    """Represents a table in a LaTeX document."""
+
+    number: int
+    label: Optional[str] = None
+    caption: Optional[str] = None
+    content: str = ""  # Raw LaTeX tabular content
+    source_file: Optional[Path] = None
+    line_number: Optional[int] = None
+    source_section: Optional[str] = None  # Section title where table appears
+
+
+@dataclass
 class LaTeXDocument:
     """Parsed LaTeX document with extracted content."""
 
@@ -54,6 +67,7 @@ class LaTeXDocument:
     abstract: Optional[str] = None
     sections: List[Section] = field(default_factory=list)
     figures: List[Figure] = field(default_factory=list)
+    tables: List[Table] = field(default_factory=list)
     math_formulas: List[MathFormula] = field(default_factory=list)
     references: Dict[str, int] = field(default_factory=dict)  # label -> figure number
     image_files: Set[Path] = field(default_factory=set)
@@ -81,6 +95,7 @@ class LaTeXProcessor:
         self.latex_dir = latex_dir
         self.main_tex_file = main_tex_file
         self.figure_counter = 0
+        self.table_counter = 0
         self.math_counter = 0
         logger.info(f"LaTeX processor initialized: {main_tex_file}")
 
@@ -118,6 +133,7 @@ class LaTeXProcessor:
         logger.info(
             f"Processed: {len(doc.sections)} sections, "
             f"{len(doc.figures)} figures, "
+            f"{len(doc.tables)} tables, "
             f"{len(doc.math_formulas)} math formulas, "
             f"{len(doc.image_files)} images"
         )
@@ -337,6 +353,19 @@ class LaTeXProcessor:
             except Exception as e:
                 logger.warning(f"Failed to extract figure from {current_file.name}: {e}")
 
+        # Extract tables from this file
+        tables_section_map = self._map_tables_to_sections(soup, current_file)
+
+        for table_node in soup.find_all("table"):
+            try:
+                section_title = tables_section_map.get(id(table_node))
+                table = self._extract_table(table_node, current_file, section_title)
+                if table:
+                    doc.tables.append(table)
+                    logger.debug(f"Extracted table {table.number} from {current_file.name}")
+            except Exception as e:
+                logger.warning(f"Failed to extract table from {current_file.name}: {e}")
+
         # Get raw text to extract content between sections
         raw_text = str(soup)
 
@@ -525,6 +554,141 @@ class LaTeXProcessor:
             logger.warning(f"Failed to extract label: {e}")
 
         return figure if figure.image_path else None
+
+    def _extract_table(
+        self, table_node: TexNode, source_file: Path, section_title: Optional[str] = None
+    ) -> Optional[Table]:
+        """
+        Extract table information from table environment.
+
+        Args:
+            table_node: TexSoup table node
+            source_file: Source .tex file
+            section_title: Title of the section containing this table
+
+        Returns:
+            Table object or None if extraction fails
+        """
+        self.table_counter += 1
+        table = Table(
+            number=self.table_counter, source_file=source_file, source_section=section_title
+        )
+
+        # Extract table content (tabular environment)
+        try:
+            tabular_node = table_node.find("tabular")
+            if tabular_node:
+                table.content = str(tabular_node)
+                logger.debug(f"Found tabular content ({len(table.content)} chars)")
+        except Exception as e:
+            logger.warning(f"Failed to extract tabular: {e}")
+
+        # Extract \caption
+        try:
+            caption_node = table_node.find("caption")
+            if caption_node:
+                table.caption = self._node_to_text(caption_node)
+                logger.debug(f"Table caption: {table.caption[:50]}...")
+        except Exception as e:
+            logger.warning(f"Failed to extract table caption: {e}")
+
+        # Extract \label
+        try:
+            label_node = table_node.find("label")
+            if label_node and label_node.args:
+                table.label = str(label_node.args[0]).strip("{}")
+                logger.debug(f"Table label: {table.label}")
+        except Exception as e:
+            logger.warning(f"Failed to extract table label: {e}")
+
+        return table if table.content else None
+
+    def _map_tables_to_sections(self, soup: TexNode, current_file: Path) -> Dict[int, str]:
+        """
+        Map table nodes to their surrounding section.
+
+        Uses the same approach as _map_figures_to_sections.
+
+        Args:
+            soup: TexSoup parsed document
+            current_file: Current .tex file
+
+        Returns:
+            Dict mapping table node id() to section title
+        """
+        table_section_map = {}
+
+        try:
+            raw_text = str(soup)
+
+            # Find all section/subsection headers and table positions
+            section_pattern = r"\\(section|subsection)\{([^}]+)\}"
+            table_pattern = r"\\begin\{table\}"
+
+            section_matches = list(re.finditer(section_pattern, raw_text))
+            table_matches = list(re.finditer(table_pattern, raw_text))
+
+            # For each table, find the most recent section before it
+            table_nodes = list(soup.find_all("table"))
+
+            for table_idx, table_match in enumerate(table_matches):
+                table_pos = table_match.start()
+
+                # Find the section that comes before this table
+                current_section = None
+                for section_match in reversed(section_matches):
+                    if section_match.start() < table_pos:
+                        section_title = self._node_to_text(TexSoup(section_match.group(2)))
+                        current_section = section_title
+                        break
+
+                # Map table node to section
+                if table_idx < len(table_nodes) and current_section:
+                    table_section_map[id(table_nodes[table_idx])] = current_section
+
+            logger.debug(
+                f"Mapped {len(table_section_map)} tables to sections in {current_file.name}"
+            )
+
+        except Exception as e:
+            logger.warning(f"Failed to map tables to sections in {current_file.name}: {e}")
+
+        return table_section_map
+
+    @staticmethod
+    def tabular_to_html(tabular_content: str) -> str:
+        """
+        Convert LaTeX tabular to HTML table.
+
+        Args:
+            tabular_content: Raw LaTeX tabular environment string
+
+        Returns:
+            HTML table string
+        """
+        # Remove \begin{tabular}{...} and \end{tabular}
+        content = re.sub(r"\\begin\{tabular\}\{[^}]+\}", "", tabular_content)
+        content = re.sub(r"\\end\{tabular\}", "", content)
+
+        # Remove table rules
+        content = re.sub(r"\\(toprule|midrule|bottomrule|hline|cline\{[^}]+\})", "", content)
+        content = re.sub(r"\\rule\{[^}]+\}\{[^}]+\}", "", content)
+
+        # Split into rows (split on \\)
+        rows = [r.strip() for r in re.split(r"\\\\", content) if r.strip()]
+
+        html_rows = []
+        for row_idx, row in enumerate(rows):
+            # Split into cells (split on &)
+            cells = [c.strip() for c in row.split("&")]
+
+            # First row is typically header
+            tag = "th" if row_idx == 0 else "td"
+
+            cell_html = "".join(f"<{tag}>{cell}</{tag}>" for cell in cells if cell)
+            html_rows.append(f"<tr>{cell_html}</tr>")
+
+        return f'<table>{"".join(html_rows)}</table>'
 
     def _extract_section_content(self, section_node: TexNode) -> str:
         r"""
