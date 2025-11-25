@@ -53,6 +53,7 @@ class Table:
     label: Optional[str] = None
     caption: Optional[str] = None
     content: str = ""  # Raw LaTeX tabular content
+    image_path: Optional[Path] = None  # Path to rendered table image
     source_file: Optional[Path] = None
     line_number: Optional[int] = None
     source_section: Optional[str] = None  # Section title where table appears

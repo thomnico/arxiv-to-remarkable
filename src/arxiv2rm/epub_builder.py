@@ -1,1009 +1,766 @@
-"""
-EPUB Builder for reMarkable-optimized ebooks.
-
-Creates EPUB 3.0 files optimized for reMarkable e-ink display:
-- Semantic HTML structure (h1, h2, p, figure)
-- OpenDyslexic font embedding
-- E-ink optimized CSS (high contrast, good line spacing)
-- Image optimization (grayscale, contrast enhancement)
-- Table of Contents generation
-"""
+"""EPUB builder for reMarkable-optimized ebooks."""
 
 import logging
 import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from importlib import resources
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from ebooklib import epub
+
+from arxiv2rm.latex_processor import LaTeXDocument, Section
+from arxiv2rm.math_renderer import MathFormula, MathRenderer
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class Chapter:
-    """Represents a chapter or section in the document."""
-
-    title: str
-    content: str  # HTML content
-    level: int = 1  # Heading level (1=chapter, 2=section, etc.)
-    images: List[Path] = field(default_factory=list)
-    file_name: Optional[str] = None
-
-    def __post_init__(self):
-        if not self.file_name:
-            # Generate safe filename from title
-            safe_title = re.sub(r"[^\w\s-]", "", self.title.lower())
-            safe_title = re.sub(r"[-\s]+", "-", safe_title).strip("-")
-            self.file_name = f"{safe_title[:50]}.xhtml"
-
-
-@dataclass
-class DocumentMetadata:
-    """Metadata for the EPUB document."""
+class EPUBMetadata:
+    """Metadata for EPUB generation."""
 
     title: str
     authors: List[str] = field(default_factory=list)
-    abstract: Optional[str] = None
     language: str = "en"
-    publisher: Optional[str] = None
-    date: Optional[str] = None
-    identifier: Optional[str] = None
+    publisher: str = "arxiv2rm"
+    description: Optional[str] = None
     source_url: Optional[str] = None
-    keywords: List[str] = field(default_factory=list)
-
-    def __post_init__(self):
-        if not self.identifier:
-            self.identifier = f"urn:uuid:{uuid.uuid4()}"
-        if not self.date:
-            self.date = datetime.now().strftime("%Y-%m-%d")
-
-
-# CSS for reMarkable e-ink display
-REMARKABLE_CSS = """
-/* reMarkable E-ink Optimized Stylesheet */
-
-/* OpenDyslexic Font Embedding */
-@font-face {
-    font-family: 'OpenDyslexic';
-    src: url('fonts/OpenDyslexic-Regular.otf') format('opentype');
-    font-weight: normal;
-    font-style: normal;
-}
-
-@font-face {
-    font-family: 'OpenDyslexic';
-    src: url('fonts/OpenDyslexic-Bold.otf') format('opentype');
-    font-weight: bold;
-    font-style: normal;
-}
-
-@font-face {
-    font-family: 'OpenDyslexic';
-    src: url('fonts/OpenDyslexic-Italic.otf') format('opentype');
-    font-weight: normal;
-    font-style: italic;
-}
-
-@font-face {
-    font-family: 'OpenDyslexic';
-    src: url('fonts/OpenDyslexic-BoldItalic.otf') format('opentype');
-    font-weight: bold;
-    font-style: italic;
-}
-
-body {
-    font-family: 'OpenDyslexic', Georgia, 'Times New Roman', serif;
-    font-size: 1em;
-    line-height: 1.8;  /* Increased for better readability */
-    margin: 1em;
-    padding: 0;
-    color: #000000;
-    background-color: #ffffff;
-    text-align: justify;
-    hyphens: auto;
-}
-
-/* Headings */
-h1 {
-    font-size: 1.8em;
-    font-weight: bold;
-    margin-top: 1.5em;
-    margin-bottom: 0.5em;
-    text-align: left;
-    page-break-after: avoid;
-}
-
-h2 {
-    font-size: 1.4em;
-    font-weight: bold;
-    margin-top: 1.2em;
-    margin-bottom: 0.4em;
-    text-align: left;
-    page-break-after: avoid;
-}
-
-h3 {
-    font-size: 1.2em;
-    font-weight: bold;
-    margin-top: 1em;
-    margin-bottom: 0.3em;
-    text-align: left;
-}
-
-/* Paragraphs - increased spacing for visual separation */
-p {
-    margin-top: 0.8em;
-    margin-bottom: 0.8em;
-    text-indent: 0;  /* No indent for cleaner look */
-}
-
-/* Empty line between paragraphs effect */
-p + p {
-    margin-top: 1.2em;
-}
-
-p:first-of-type {
-    margin-top: 0;
-}
-
-/* Paragraph breaks - visible spacing */
-.para-break {
-    height: 0.5em;
-    display: block;
-}
-
-/* Figures and images */
-figure {
-    margin: 1em 0;
-    padding: 0;
-    text-align: center;
-    page-break-inside: avoid;
-}
-
-figure img {
-    max-width: 100%;
-    height: auto;
-    display: block;
-    margin: 0 auto;
-}
-
-figcaption {
-    font-size: 0.9em;
-    font-style: italic;
-    margin-top: 0.5em;
-    text-align: center;
-    color: #333333;
-}
-
-/* Code blocks */
-pre, code {
-    font-family: 'Courier New', Courier, monospace;
-    font-size: 0.9em;
-    background-color: #f5f5f5;
-    border: 1px solid #cccccc;
-    padding: 0.2em 0.4em;
-}
-
-pre {
-    display: block;
-    padding: 1em;
-    margin: 1em 0;
-    overflow-x: auto;
-    white-space: pre-wrap;
-    word-wrap: break-word;
-}
-
-/* Lists */
-ul, ol {
-    margin: 0.5em 0;
-    padding-left: 2em;
-}
-
-li {
-    margin-bottom: 0.3em;
-}
-
-/* Blockquotes (for abstract) */
-blockquote {
-    margin: 1em 2em;
-    padding: 0.5em 1em;
-    border-left: 3px solid #666666;
-    font-style: italic;
-    background-color: #f9f9f9;
-}
-
-/* Tables */
-table {
-    border-collapse: collapse;
-    margin: 1em 0;
-    width: 100%;
-}
-
-th, td {
-    border: 1px solid #333333;
-    padding: 0.5em;
-    text-align: left;
-}
-
-th {
-    background-color: #f0f0f0;
-    font-weight: bold;
-}
-
-/* Links */
-a {
-    color: #000000;
-    text-decoration: underline;
-}
-
-/* Title page */
-.title-page {
-    text-align: center;
-    margin-top: 30%;
-}
-
-.title-page h1 {
-    font-size: 2em;
-    margin-bottom: 0.5em;
-}
-
-.title-page .authors {
-    font-size: 1.2em;
-    margin-top: 1em;
-}
-
-.title-page .date {
-    font-size: 1em;
-    margin-top: 2em;
-    color: #666666;
-}
-
-/* Abstract */
-.abstract {
-    margin: 2em 1em;
-}
-
-.abstract h2 {
-    font-size: 1.2em;
-}
-
-/* Chapter breaks */
-.chapter {
-    page-break-before: always;
-}
-
-/* Notes zone - 20% of page height at bottom for handwriting annotations */
-.notes-zone {
-    margin-top: 2em;
-    padding: 1em;
-    border-top: 1px dashed #999999;
-    min-height: 20vh;  /* 20% of viewport height */
-    height: 20vh;
-    color: #999999;
-    font-size: 0.8em;
-    font-style: italic;
-    background-color: #fafafa;
-}
-
-.notes-zone::before {
-    content: "Notes";
-    display: block;
-    margin-bottom: 0.5em;
-    font-weight: bold;
-}
-
-/* Page section with notes area */
-.page-section {
-    margin-bottom: 2em;
-    padding-bottom: 1em;
-}
-
-/* Inline figures (placed within content flow) */
-.inline-figure {
-    margin: 1.5em auto;
-    max-width: 90%;
-}
-
-/* Citations/References styling */
-.citation {
-    margin-left: 2em;
-    text-indent: -2em;  /* Hanging indent for citations */
-    margin-bottom: 0.8em;
-    font-size: 0.95em;
-    line-height: 1.5;
-}
-
-/* Subsubsection headings */
-h4 {
-    font-size: 1.1em;
-    font-weight: bold;
-    margin-top: 0.8em;
-    margin-bottom: 0.2em;
-    text-align: left;
-}
-
-/* Page numbers (for PDF conversion) */
-@page {
-    margin: 2cm;
-}
-"""
+    identifier: Optional[str] = None  # ISBN or UUID
+    date: Optional[str] = None
 
 
 class EPUBBuilder:
-    """
-    Builds EPUB files optimized for reMarkable e-ink display.
+    """Build EPUB 3.0 books from LaTeX documents."""
 
-    Usage:
-        builder = EPUBBuilder()
-        builder.set_metadata(title="Paper Title", authors=["Author Name"])
-        builder.add_chapter("Introduction", "<p>Content...</p>")
-        builder.add_chapter("Methods", "<p>More content...</p>")
-        builder.build("output.epub")
-    """
-
-    def __init__(self, css: Optional[str] = None, embed_fonts: bool = True):
+    def __init__(
+        self,
+        metadata: EPUBMetadata,
+        output_path: Optional[Path] = None,
+        render_math: bool = True,
+    ):
         """
         Initialize EPUB builder.
 
         Args:
-            css: Custom CSS (uses REMARKABLE_CSS by default)
-            embed_fonts: Whether to embed OpenDyslexic fonts (default: True)
+            metadata: EPUB metadata (title, authors, etc.)
+            output_path: Path to save EPUB file
+            render_math: Whether to render math formulas to images (default: True)
         """
+        self.metadata = metadata
+        self.output_path = output_path
         self.book = epub.EpubBook()
-        self.css = css or REMARKABLE_CSS
-        self.chapters: List[epub.EpubHtml] = []
-        self.images: Dict[str, epub.EpubImage] = {}
-        self.metadata: Optional[DocumentMetadata] = None
-        self._chapter_counter = 0
-        self._embed_fonts = embed_fonts
+        self.chapters = []
+        self.spine = ["nav"]
+        self.toc = []
+        self.latex_doc = None  # Store LaTeX doc for figure references
+        self.render_math = render_math
+        self.math_renderer = MathRenderer() if render_math else None
+        self.rendered_math: Dict[str, Path] = {}  # formula_id -> image path
 
-        # Create CSS item upfront so chapters can reference it
-        self._css_item = epub.EpubItem(
-            uid="style",
-            file_name="style.css",
-            media_type="text/css",
-            content=self.css.encode("utf-8"),
-        )
-        self.book.add_item(self._css_item)
+        # Generate UUID if not provided
+        if not metadata.identifier:
+            metadata.identifier = str(uuid.uuid4())
 
-        # Embed OpenDyslexic fonts
-        if self._embed_fonts:
-            self._add_fonts()
+        # Set date if not provided
+        if not metadata.date:
+            metadata.date = datetime.now().strftime("%Y-%m-%d")
 
-    def _add_fonts(self) -> None:
-        """Embed OpenDyslexic font files in the EPUB."""
-        font_files = [
-            ("OpenDyslexic-Regular.otf", "normal", "normal"),
-            ("OpenDyslexic-Bold.otf", "bold", "normal"),
-            ("OpenDyslexic-Italic.otf", "normal", "italic"),
-            ("OpenDyslexic-BoldItalic.otf", "bold", "italic"),
-        ]
+        logger.info(f"EPUBBuilder initialized: {metadata.title}")
 
-        # Try to find fonts in package resources
-        try:
-            # Python 3.9+ style
-            fonts_package = resources.files("arxiv2rm") / "fonts"
-            for font_name, weight, style in font_files:
-                font_path = fonts_package / font_name
-                if hasattr(font_path, "read_bytes"):
-                    font_data = font_path.read_bytes()
-                else:
-                    # Fallback for older Python versions
-                    with resources.as_file(font_path) as fp:
-                        font_data = fp.read_bytes()
-
-                # Create EPUB font item
-                font_item = epub.EpubItem(
-                    uid=f"font_{font_name.replace('.', '_')}",
-                    file_name=f"fonts/{font_name}",
-                    media_type="application/vnd.ms-opentype",
-                    content=font_data,
-                )
-                self.book.add_item(font_item)
-                logger.debug(f"Embedded font: {font_name}")
-
-        except Exception as e:
-            logger.warning(f"Could not embed fonts: {e}. Using system fonts as fallback.")
-
-    def set_metadata(
-        self,
-        title: str,
-        authors: Optional[List[str]] = None,
-        abstract: Optional[str] = None,
-        language: str = "en",
-        publisher: Optional[str] = None,
-        source_url: Optional[str] = None,
-        keywords: Optional[List[str]] = None,
-    ) -> None:
+    def build_from_latex(self, latex_doc: LaTeXDocument) -> epub.EpubBook:
         """
-        Set document metadata.
+        Build EPUB from parsed LaTeX document.
 
         Args:
-            title: Document title
-            authors: List of author names
-            abstract: Document abstract
-            language: Language code (default: "en")
-            publisher: Publisher name
-            source_url: Original source URL
-            keywords: List of keywords
-        """
-        self.metadata = DocumentMetadata(
-            title=title,
-            authors=authors or [],
-            abstract=abstract,
-            language=language,
-            publisher=publisher,
-            source_url=source_url,
-            keywords=keywords or [],
-        )
+            latex_doc: Parsed LaTeX document
 
-        # Set book metadata
-        self.book.set_identifier(self.metadata.identifier)
+        Returns:
+            EpubBook object ready to write
+        """
+        logger.info("Building EPUB from LaTeX document...")
+
+        # Store latex_doc for figure references
+        self.latex_doc = latex_doc
+
+        # Use LaTeX metadata if available
+        if latex_doc.title:
+            self.metadata.title = latex_doc.title
+        if latex_doc.authors:
+            self.metadata.authors = latex_doc.authors
+
+        # Set metadata
+        self._set_metadata()
+
+        # Render math formulas if enabled
+        if self.render_math and latex_doc.math_formulas:
+            self._render_math_formulas(latex_doc.math_formulas)
+
+        # Create abstract chapter if present
+        if latex_doc.abstract:
+            self._add_abstract(latex_doc.abstract)
+
+        # Create chapters from sections
+        self._create_chapters_from_sections(latex_doc.sections)
+
+        # Add appendix for unmatched figures and tables
+        self._add_figures_tables_appendix()
+
+        # Build navigation
+        self._build_navigation()
+
+        logger.info(f"EPUB built: {len(self.chapters)} chapters")
+        return self.book
+
+    def _set_metadata(self):
+        """Set EPUB metadata from EPUBMetadata."""
+        # Title
         self.book.set_title(self.metadata.title)
+
+        # Language
         self.book.set_language(self.metadata.language)
 
+        # Identifier (ISBN or UUID)
+        self.book.set_identifier(self.metadata.identifier)
+
+        # Authors
         for author in self.metadata.authors:
             self.book.add_author(author)
 
+        # Publisher
         if self.metadata.publisher:
             self.book.add_metadata("DC", "publisher", self.metadata.publisher)
 
+        # Description
+        if self.metadata.description:
+            self.book.add_metadata("DC", "description", self.metadata.description)
+
+        # Date
+        if self.metadata.date:
+            self.book.add_metadata("DC", "date", self.metadata.date)
+
+        # Source URL
         if self.metadata.source_url:
             self.book.add_metadata("DC", "source", self.metadata.source_url)
 
-        for keyword in self.metadata.keywords:
-            self.book.add_metadata("DC", "subject", keyword)
+        logger.debug(f"Metadata set: {self.metadata.title}")
 
-        logger.info(f"Set metadata: {title} by {', '.join(authors or ['Unknown'])}")
-
-    def set_cover_image(self, image_path: Path) -> bool:
+    def _add_abstract(self, abstract: str):
         """
-        Set the cover image for the EPUB.
+        Add abstract as first chapter.
 
         Args:
-            image_path: Path to the cover image file
-
-        Returns:
-            True if cover was set successfully, False otherwise
+            abstract: Abstract text
         """
-        image_path = Path(image_path)
-        if not image_path.exists():
-            logger.warning(f"Cover image not found: {image_path}")
-            return False
-
-        # Determine file name for cover
-        suffix = image_path.suffix.lower()
-        cover_filename = f"cover{suffix}"
-
-        try:
-            with open(image_path, "rb") as f:
-                content = f.read()
-
-            # Use ebooklib's set_cover method
-            self.book.set_cover(cover_filename, content)
-            logger.info(f"Set cover image: {image_path.name}")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to set cover image: {e}")
-            return False
-
-    def add_image(
-        self,
-        image_path: Path,
-        alt_text: Optional[str] = None,
-    ) -> str:
-        """
-        Add an image to the EPUB.
-
-        Args:
-            image_path: Path to image file
-            alt_text: Alternative text for accessibility
-
-        Returns:
-            Reference path for use in HTML (e.g., "images/fig1.png")
-        """
-        image_path = Path(image_path)
-        if not image_path.exists():
-            logger.warning(f"Image not found: {image_path}")
-            return ""
-
-        # Determine media type
-        suffix = image_path.suffix.lower()
-        media_types = {
-            ".png": "image/png",
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".gif": "image/gif",
-            ".svg": "image/svg+xml",
-        }
-        media_type = media_types.get(suffix, "image/png")
-
-        # Create unique filename
-        file_name = f"images/{image_path.name}"
-        if file_name in self.images:
-            # Add counter for duplicates
-            base = image_path.stem
-            file_name = f"images/{base}_{len(self.images)}{suffix}"
-
-        # Read image content
-        with open(image_path, "rb") as f:
-            content = f.read()
-
-        # Create EPUB image
-        epub_image = epub.EpubImage()
-        epub_image.file_name = file_name
-        epub_image.media_type = media_type
-        epub_image.content = content
-
-        self.book.add_item(epub_image)
-        self.images[file_name] = epub_image
-
-        logger.debug(f"Added image: {file_name}")
-        return file_name
-
-    def add_chapter(
-        self,
-        title: str,
-        content: str,
-        level: int = 1,
-        images: Optional[List[Path]] = None,
-    ) -> epub.EpubHtml:
-        """
-        Add a chapter to the EPUB.
-
-        Args:
-            title: Chapter title
-            content: HTML content (paragraphs, figures, etc.)
-            level: Heading level (1=chapter, 2=section)
-            images: List of image paths to include
-
-        Returns:
-            EpubHtml chapter object
-        """
-        self._chapter_counter += 1
-
-        # Create safe filename
-        safe_title = re.sub(r"[^\w\s-]", "", title.lower())
-        safe_title = re.sub(r"[-\s]+", "-", safe_title).strip("-")[:50]
-        file_name = f"chapter_{self._chapter_counter:02d}_{safe_title}.xhtml"
-
-        # Add images if provided
-        image_refs = []
-        if images:
-            for img_path in images:
-                ref = self.add_image(img_path)
-                if ref:
-                    image_refs.append(ref)
-
-        # Build chapter HTML - use simple structure for ebooklib compatibility
-        heading_tag = f"h{min(level, 6)}"
-        chapter_class = "chapter" if level == 1 else "section"
-
-        html_content = f"""<html>
-<head>
-<title>{title}</title>
-<link rel="stylesheet" type="text/css" href="style.css"/>
-</head>
-<body class="{chapter_class}">
-<{heading_tag}>{title}</{heading_tag}>
-{content}
-</body>
-</html>"""
-
-        # Create EPUB chapter
         chapter = epub.EpubHtml(
-            title=title,
-            file_name=file_name,
-            lang=self.metadata.language if self.metadata else "en",
-        )
-        chapter.content = html_content
-
-        # Link CSS stylesheet to this chapter
-        chapter.add_item(self._css_item)
-
-        self.book.add_item(chapter)
-        self.chapters.append(chapter)
-
-        logger.debug(f"Added chapter: {title} ({file_name})")
-        return chapter
-
-    def add_title_page(self) -> epub.EpubHtml:
-        """
-        Add a title page with metadata.
-
-        Returns:
-            EpubHtml title page object
-        """
-        if not self.metadata:
-            raise ValueError("Metadata must be set before adding title page")
-
-        authors_html = "<br/>".join(self.metadata.authors) if self.metadata.authors else "Unknown"
-
-        html_content = f"""<html>
-<head>
-<title>{self.metadata.title}</title>
-<link rel="stylesheet" type="text/css" href="style.css"/>
-</head>
-<body>
-<div class="title-page">
-<h1>{self.metadata.title}</h1>
-<p class="authors">{authors_html}</p>
-<p class="date">{self.metadata.date}</p>
-</div>
-</body>
-</html>"""
-
-        title_page = epub.EpubHtml(
-            title="Title Page",
-            file_name="title.xhtml",
-            lang=self.metadata.language,
-        )
-        title_page.content = html_content
-
-        # Link CSS stylesheet
-        title_page.add_item(self._css_item)
-
-        self.book.add_item(title_page)
-        self.chapters.insert(0, title_page)  # Add at beginning
-
-        logger.debug("Added title page")
-        return title_page
-
-    def add_abstract_page(self) -> Optional[epub.EpubHtml]:
-        """
-        Add an abstract page if abstract is available.
-
-        Returns:
-            EpubHtml abstract page object or None
-        """
-        if not self.metadata or not self.metadata.abstract:
-            return None
-
-        html_content = f"""<html>
-<head>
-<title>Abstract</title>
-<link rel="stylesheet" type="text/css" href="style.css"/>
-</head>
-<body>
-<div class="abstract">
-<h2>Abstract</h2>
-<blockquote>
-{self.metadata.abstract}
-</blockquote>
-</div>
-</body>
-</html>"""
-
-        abstract_page = epub.EpubHtml(
             title="Abstract",
             file_name="abstract.xhtml",
             lang=self.metadata.language,
         )
-        abstract_page.content = html_content
 
-        # Link CSS stylesheet
-        abstract_page.add_item(self._css_item)
-
-        self.book.add_item(abstract_page)
-        # Insert after title page
-        insert_pos = 1 if self.chapters and self.chapters[0].file_name == "title.xhtml" else 0
-        self.chapters.insert(insert_pos, abstract_page)
-
-        logger.debug("Added abstract page")
-        return abstract_page
-
-    def build(self, output_path: Path) -> Path:
+        # Simple HTML content
+        content = f"""
+        <html>
+        <head>
+            <title>Abstract</title>
+        </head>
+        <body>
+            <h1>Abstract</h1>
+            <div class="abstract">
+                <p>{self._escape_html(abstract)}</p>
+            </div>
+        </body>
+        </html>
         """
-        Build and save the EPUB file.
+
+        chapter.content = content.encode("utf-8")
+        self.book.add_item(chapter)
+        self.chapters.append(chapter)
+        self.spine.append(chapter)
+        self.toc.append(epub.Link("abstract.xhtml", "Abstract", "abstract"))
+
+        logger.debug("Added abstract chapter")
+
+    def _create_chapters_from_sections(self, sections: List[Section]):
+        """
+        Create EPUB chapters from LaTeX sections.
 
         Args:
-            output_path: Path to save EPUB file
+            sections: List of LaTeX sections
+        """
+        # Group sections by level 1 (top-level sections)
+        current_chapter = None
+        chapter_sections = []
+
+        for section in sections:
+            if section.level == 1:
+                # Save previous chapter if exists
+                if current_chapter:
+                    self._add_chapter(current_chapter, chapter_sections)
+
+                # Start new chapter
+                current_chapter = section
+                chapter_sections = []
+            else:
+                # Add subsection to current chapter
+                if current_chapter:
+                    chapter_sections.append(section)
+                else:
+                    # Orphaned subsection - create chapter for it
+                    logger.warning(f"Orphaned subsection: {section.title}")
+                    current_chapter = section
+                    chapter_sections = []
+
+        # Add final chapter
+        if current_chapter:
+            self._add_chapter(current_chapter, chapter_sections)
+
+        logger.debug(f"Created {len(self.chapters)} chapters from sections")
+
+    def _add_chapter(self, main_section: Section, subsections: List[Section]):
+        """
+        Add a chapter to the EPUB.
+
+        Args:
+            main_section: Main section (level 1)
+            subsections: Subsections within this chapter
+        """
+        # Sanitize filename
+        file_name = self._sanitize_filename(main_section.title) + ".xhtml"
+
+        chapter = epub.EpubHtml(
+            title=main_section.title,
+            file_name=file_name,
+            lang=self.metadata.language,
+        )
+
+        # Build HTML content
+        content = self._build_chapter_html(main_section, subsections)
+        chapter.content = content.encode("utf-8")
+
+        self.book.add_item(chapter)
+        self.chapters.append(chapter)
+        self.spine.append(chapter)
+        self.toc.append(epub.Link(file_name, main_section.title, file_name))
+
+        logger.debug(f"Added chapter: {main_section.title}")
+
+    def _build_chapter_html(self, main_section: Section, subsections: List[Section]) -> str:
+        """
+        Build HTML content for a chapter.
+
+        Args:
+            main_section: Main section
+            subsections: Subsections
 
         Returns:
-            Path to the created EPUB file
+            HTML content as string
         """
-        output_path = Path(output_path)
+        html = f"""
+        <html>
+        <head>
+            <title>{self._escape_html(main_section.title)}</title>
+        </head>
+        <body>
+            <h1>{self._escape_html(main_section.title)}</h1>
+        """
 
-        # CSS already added in __init__
+        # Main section content - split into paragraphs
+        if main_section.content:
+            paragraphs = main_section.content.split("\n\n")
+            for para in paragraphs:
+                para = para.strip()
+                if para:
+                    html += f"<p>{self._escape_html(para)}</p>\n"
 
-        # Set spine (reading order)
-        self.book.spine = ["nav"] + self.chapters
+        # Add figures for this chapter (only figures that belong to this section)
+        if self.latex_doc and self.latex_doc.figures:
+            # Filter figures by section - include figures that match:
+            # 1. The main section title
+            # 2. Any subsection title in this chapter
+            # Build list of all section/subsection titles in this chapter
+            chapter_section_titles = {main_section.title}
+            for subsection in subsections:
+                chapter_section_titles.add(subsection.title)
 
-        # Create table of contents
-        self.book.toc = [
-            epub.Link(ch.file_name, ch.title, ch.file_name.replace(".xhtml", ""))
-            for ch in self.chapters
+            chapter_figures = [
+                (idx, fig)
+                for idx, fig in enumerate(self.latex_doc.figures)
+                if fig.source_section in chapter_section_titles
+            ]
+
+            for idx, figure in chapter_figures:
+                # Skip PDF figures - they can't be optimized by PIL
+                if figure.image_path and figure.image_path.endswith(".pdf"):
+                    logger.debug(f"Skipping PDF figure {figure.number}: {figure.image_path}")
+                    continue
+
+                # Determine image filename from figure's image_path
+                # Extract just the filename without extension and sanitize
+                if figure.image_path:
+                    # Handle paths like "Figures/ModalNet-21" -> "ModalNet_21_opt.jpg"
+                    from pathlib import Path
+
+                    img_stem = Path(figure.image_path).stem.replace("-", "_").replace(" ", "_")
+                    figure_filename = f"{img_stem}_opt.jpg"
+                else:
+                    # Fallback to index-based naming
+                    figure_filename = f"figure_{figure.number}_opt.jpg"
+
+                caption_text = f": {self._escape_html(figure.caption)}" if figure.caption else ""
+                html += f"""
+            <figure id="fig{figure.number}">
+                <img src="images/{figure_filename}" alt="Figure {figure.number}"/>
+                <figcaption>Figure {figure.number}{caption_text}</figcaption>
+            </figure>
+"""
+
+        # Add tables for this chapter (same filtering logic as figures)
+        if self.latex_doc and self.latex_doc.tables:
+            chapter_tables = [
+                table
+                for table in self.latex_doc.tables
+                if table.source_section in chapter_section_titles
+            ]
+
+            for table in chapter_tables:
+                from arxiv2rm.latex_processor import LaTeXProcessor
+
+                # Convert LaTeX tabular to HTML table
+                table_html = LaTeXProcessor.tabular_to_html(table.content)
+
+                # Replace math in table cells if math rendering is enabled
+                if self.render_math:
+                    table_html = self._replace_math_in_content(table_html)
+
+                caption_text = f": {self._escape_html(table.caption)}" if table.caption else ""
+                html += f"""
+            <div class="table-container" id="tab{table.number}">
+                <p class="table-caption">Table {table.number}{caption_text}</p>
+                {table_html}
+            </div>
+"""
+
+        # Subsections
+        for subsection in subsections:
+            heading_level = min(subsection.level, 6)  # h2-h6 (h1 is chapter title)
+            html += f"<h{heading_level}>{self._escape_html(subsection.title)}</h{heading_level}>\n"
+            if subsection.content:
+                # Split subsection content into paragraphs too
+                paragraphs = subsection.content.split("\n\n")
+                for para in paragraphs:
+                    para = para.strip()
+                    if para:
+                        html += f"<p>{self._escape_html(para)}</p>\n"
+
+        # Add notes section at the end of the chapter
+        html += self._build_notes_section()
+
+        html += """
+        </body>
+        </html>
+        """
+
+        # Replace math formulas with images if enabled
+        if self.render_math:
+            html = self._replace_math_in_content(html)
+
+        return html
+
+    def _add_figures_tables_appendix(self):
+        """
+        Add an appendix chapter with all unmatched figures and tables.
+
+        This catches figures/tables that couldn't be matched to a specific section
+        (i.e., those with source_section=None).
+        """
+        if not self.latex_doc:
+            return
+
+        # Collect all sections that were used in chapters
+        used_sections = set()
+        for section in self.latex_doc.sections:
+            if section.level == 1:
+                used_sections.add(section.title)
+
+        # Find unmatched figures (source_section=None or not in used_sections)
+        unmatched_figures = [
+            fig
+            for fig in self.latex_doc.figures
+            if not fig.source_section or fig.source_section not in used_sections
         ]
 
-        # Add navigation files
+        # Find unmatched tables (source_section=None or not in used_sections)
+        unmatched_tables = [
+            table
+            for table in self.latex_doc.tables
+            if not table.source_section or table.source_section not in used_sections
+        ]
+
+        # Only create appendix if there are unmatched items
+        if not unmatched_figures and not unmatched_tables:
+            logger.debug("No unmatched figures or tables, skipping appendix")
+            return
+
+        logger.info(
+            f"Creating appendix for {len(unmatched_figures)} figures "
+            f"and {len(unmatched_tables)} tables"
+        )
+
+        # Create appendix chapter
+        chapter = epub.EpubHtml(
+            title="Figures and Tables",
+            file_name="appendix_figures_tables.xhtml",
+            lang=self.metadata.language,
+        )
+
+        # Build HTML content
+        html = """
+        <html>
+        <head>
+            <title>Figures and Tables</title>
+        </head>
+        <body>
+            <h1>Figures and Tables</h1>
+            <p style="font-style: italic; color: #666;">
+            This appendix contains figures and tables that could not be
+            automatically placed in their corresponding sections.
+            </p>
+        """
+
+        # Add unmatched figures
+        for figure in unmatched_figures:
+            # Skip PDF figures
+            if figure.image_path and figure.image_path.endswith(".pdf"):
+                logger.debug(f"Skipping PDF figure {figure.number}")
+                continue
+
+            # Determine image filename
+            if figure.image_path:
+                from pathlib import Path
+
+                img_stem = Path(figure.image_path).stem.replace("-", "_").replace(" ", "_")
+                figure_filename = f"{img_stem}_opt.jpg"
+            else:
+                figure_filename = f"figure_{figure.number}_opt.jpg"
+
+            caption_text = f": {self._escape_html(figure.caption)}" if figure.caption else ""
+            html += f"""
+            <figure id="fig{figure.number}">
+                <img src="images/{figure_filename}" alt="Figure {figure.number}"/>
+                <figcaption>Figure {figure.number}{caption_text}</figcaption>
+            </figure>
+"""
+
+        # Add unmatched tables
+        for table in unmatched_tables:
+            # Only add tables that have been rendered to images
+            if not table.image_path:
+                logger.debug(f"Skipping table {table.number}: no rendered image")
+                continue
+
+            table_filename = f"table_{table.number}.png"
+            caption_text = f": {self._escape_html(table.caption)}" if table.caption else ""
+            html += f"""
+            <figure class="table-figure" id="tab{table.number}">
+                <img src="images/{table_filename}" alt="Table {table.number}"/>
+                <figcaption>Table {table.number}{caption_text}</figcaption>
+            </figure>
+"""
+
+        # Add notes section
+        html += self._build_notes_section()
+
+        html += """
+        </body>
+        </html>
+        """
+
+        chapter.content = html.encode("utf-8")
+        self.book.add_item(chapter)
+        self.chapters.append(chapter)
+        self.spine.append(chapter)
+        self.toc.append(
+            epub.Link("appendix_figures_tables.xhtml", "Figures and Tables", "appendix")
+        )
+
+        logger.debug("Added Figures and Tables appendix")
+
+    def _build_notes_section(self) -> str:
+        """
+        Build a notes section for handwritten annotations.
+
+        Creates a blank area with ruled lines that takes up approximately
+        20% of the vertical space, suitable for reMarkable stylus notes.
+
+        Returns:
+            HTML string for notes section
+        """
+        # Create a section with ruled lines for notes
+        # Using multiple divs with border-bottom to create ruled lines
+        lines = []
+        line_style = "height: 2em; border-bottom: 1px solid #CCCCCC; margin: 0;"
+        for i in range(8):  # 8 ruled lines for notes
+            lines.append(f'<div class="notes-line" style="{line_style}"></div>')
+
+        notes_style = (
+            "margin-top: 4em; padding-top: 1em; "
+            "border-top: 2px solid #000000; page-break-inside: avoid;"
+        )
+        label_style = "font-size: 10pt; font-style: italic; " "color: #666666; margin-bottom: 1em;"
+
+        notes_html = f"""
+        <div class="notes-section" style="{notes_style}">
+            <p style="{label_style}">Notes:</p>
+            {''.join(lines)}
+        </div>
+        """
+        return notes_html
+
+    def _build_navigation(self):
+        """Build EPUB navigation (TOC)."""
+        self.book.toc = tuple(self.toc)
+        self.book.spine = self.spine
+
+        # Add default NCX and Nav files
         self.book.add_item(epub.EpubNcx())
         self.book.add_item(epub.EpubNav())
 
-        # Write EPUB file
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        epub.write_epub(str(output_path), self.book, {})
+        logger.debug("Navigation built")
 
-        logger.info(f"EPUB created: {output_path}")
-        return output_path
-
-
-class TextToHTMLConverter:
-    """
-    Converts extracted text to semantic HTML for EPUB.
-
-    Handles:
-    - Paragraph detection
-    - Heading detection (based on font size or patterns)
-    - List detection
-    - Figure/image integration
-    - References/citations formatting
-    """
-
-    def __init__(self):
-        # Standalone section names (without numbers)
-        self.standalone_sections = [
-            "abstract",
-            "introduction",
-            "background",
-            "related work",
-            "methods",
-            "method",
-            "methodology",
-            "materials and methods",
-            "results",
-            "result",
-            "findings",
-            "discussion",
-            "conclusions",
-            "conclusion",
-            "references",
-            "bibliography",
-            "acknowledgments",
-            "acknowledgements",
-            "acknowledgment",
-            "appendix",
-            "supplementary",
-            "supplemental",
-            "limitations",
-            "future work",
-            "future directions",
-        ]
-
-    def convert(
-        self,
-        text: str,
-        images: Optional[List[Tuple[Path, str]]] = None,
-    ) -> str:
+    def add_css(self, css_content: str, file_name: str = "style.css"):
         """
-        Convert plain text to HTML.
+        Add CSS stylesheet to EPUB.
 
         Args:
-            text: Plain text content
-            images: List of (image_path, caption) tuples
+            css_content: CSS content as string
+            file_name: CSS file name
+        """
+        css = epub.EpubItem(
+            uid="style",
+            file_name=file_name,
+            media_type="text/css",
+            content=css_content.encode("utf-8"),
+        )
+        self.book.add_item(css)
+
+        # Apply CSS to all chapters
+        for chapter in self.chapters:
+            chapter.add_item(css)
+
+        logger.debug(f"Added CSS: {file_name}")
+
+    def add_font(self, font_path: Path, font_name: str):
+        """
+        Add font file to EPUB.
+
+        Args:
+            font_path: Path to font file (TTF/OTF)
+            font_name: Font file name in EPUB
+        """
+        if not font_path.exists():
+            raise ValueError(f"Font file not found: {font_path}")
+
+        # Determine media type
+        suffix = font_path.suffix.lower()
+        if suffix == ".ttf":
+            media_type = "font/ttf"
+        elif suffix == ".otf":
+            media_type = "font/otf"
+        elif suffix == ".woff":
+            media_type = "font/woff"
+        elif suffix == ".woff2":
+            media_type = "font/woff2"
+        else:
+            raise ValueError(f"Unsupported font format: {suffix}")
+
+        font = epub.EpubItem(
+            uid=f"font_{font_name}",
+            file_name=f"fonts/{font_name}",
+            media_type=media_type,
+            content=font_path.read_bytes(),
+        )
+        self.book.add_item(font)
+
+        logger.debug(f"Added font: {font_name}")
+
+    def add_image(self, image_path: Path, image_name: Optional[str] = None):
+        """
+        Add image to EPUB.
+
+        Args:
+            image_path: Path to image file
+            image_name: Image file name in EPUB (default: same as source)
+        """
+        if not image_path.exists():
+            raise ValueError(f"Image file not found: {image_path}")
+
+        if image_name is None:
+            image_name = image_path.name
+
+        # Determine media type
+        suffix = image_path.suffix.lower()
+        media_types = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".gif": "image/gif",
+            ".svg": "image/svg+xml",
+        }
+
+        media_type = media_types.get(suffix, "image/jpeg")
+
+        image = epub.EpubItem(
+            uid=f"image_{image_name}",
+            file_name=f"images/{image_name}",
+            media_type=media_type,
+            content=image_path.read_bytes(),
+        )
+        self.book.add_item(image)
+
+        logger.debug(f"Added image: {image_name}")
+
+    def _render_math_formulas(self, formulas: List[MathFormula]):
+        """
+        Render math formulas to images and add to EPUB.
+
+        Args:
+            formulas: List of math formulas to render
+        """
+        import tempfile
+
+        logger.info(f"Rendering {len(formulas)} math formulas...")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+
+            for formula in formulas:
+                try:
+                    # Render formula to image
+                    output_path = tmpdir_path / f"{formula.formula_id}.png"
+                    rendered_path = self.math_renderer.render(formula, output_path)
+
+                    if rendered_path:
+                        # Add image to EPUB
+                        self.add_image(rendered_path, f"{formula.formula_id}.png")
+                        self.rendered_math[formula.formula_id] = rendered_path
+                        logger.debug(f"Rendered math formula: {formula.formula_id}")
+                    else:
+                        logger.warning(f"Failed to render math formula: {formula.formula_id}")
+
+                except Exception as e:
+                    logger.error(f"Error rendering math {formula.formula_id}: {e}")
+
+        logger.info(f"Rendered {len(self.rendered_math)} math formulas")
+
+    def _replace_math_in_content(self, content: str) -> str:
+        """
+        Replace LaTeX math with image tags in HTML content.
+
+        Args:
+            content: HTML content with LaTeX math
 
         Returns:
-            HTML string
+            HTML content with math replaced by images
         """
-        if not text:
-            return ""
+        if not self.render_math or not self.latex_doc:
+            return content
 
-        # Check if this is a references section
-        is_references = self._is_references_section(text)
+        # Replace inline math: $...$
+        def replace_inline(match):
+            latex_code = match.group(1)
+            # Find matching formula
+            for formula in self.latex_doc.math_formulas:
+                if formula.latex_code == latex_code and not formula.is_display:
+                    if formula.formula_id in self.rendered_math:
+                        return (
+                            f'<span class="math-inline">'
+                            f'<img src="images/{formula.formula_id}.png" '
+                            f'alt="{self._escape_html(latex_code)}" '
+                            f'style="display: inline; vertical-align: middle;"/>'
+                            f"</span>"
+                        )
+            # If not found, leave as-is
+            return match.group(0)
 
-        # Split into paragraphs
-        paragraphs = self._split_paragraphs(text)
+        content = re.sub(r"\$([^\$]+)\$", replace_inline, content)
 
-        html_parts = []
-        for para in paragraphs:
-            para = para.strip()
-            if not para:
-                continue
+        # Replace display math environments
+        display_envs = ["equation", "equation*", "align", "align*", "eqnarray", "eqnarray*"]
+        for env in display_envs:
+            pattern = rf"\\begin\{{{env}\}}(.*?)\\end\{{{env}\}}"
 
-            # Check if it's a heading
-            heading_level = self._detect_heading(para)
-            if heading_level:
-                html_parts.append(f"<h{heading_level}>{self._escape_html(para)}</h{heading_level}>")
-            elif is_references and self._is_citation_entry(para):
-                # Format as citation entry
-                html_parts.append(self._format_citation(para))
-            else:
-                # Regular paragraph
-                html_parts.append(f"<p>{self._escape_html(para)}</p>")
+            def replace_display(match):
+                latex_code = match.group(1).strip()
+                # Find matching formula
+                for formula in self.latex_doc.math_formulas:
+                    if formula.latex_code == latex_code and formula.is_display:
+                        if formula.formula_id in self.rendered_math:
+                            return (
+                                f'<div class="math-display">'
+                                f'<img src="images/{formula.formula_id}.png" '
+                                f'alt="{self._escape_html(latex_code)}" '
+                                f'class="equation-image"/>'
+                                f"</div>"
+                            )
+                # If not found, leave as-is
+                return match.group(0)
 
-        # Add images at the end
-        if images:
-            for img_path, caption in images:
-                img_ref = f"images/{img_path.name}"
-                figure_html = f"""
-<figure>
-    <img src="{img_ref}" alt="{self._escape_html(caption)}"/>
-    <figcaption>{self._escape_html(caption)}</figcaption>
-</figure>"""
-                html_parts.append(figure_html)
+            content = re.sub(pattern, replace_display, content, flags=re.DOTALL)
 
-        return "\n".join(html_parts)
+        # Replace \[...\] display math
+        def replace_bracket_display(match):
+            latex_code = match.group(1).strip()
+            # Find matching formula
+            for formula in self.latex_doc.math_formulas:
+                if formula.latex_code == latex_code and formula.is_display:
+                    if formula.formula_id in self.rendered_math:
+                        return (
+                            f'<div class="math-display">'
+                            f'<img src="images/{formula.formula_id}.png" '
+                            f'alt="{self._escape_html(latex_code)}" '
+                            f'class="equation-image"/>'
+                            f"</div>"
+                        )
+            # If not found, leave as-is
+            return match.group(0)
 
-    def _is_references_section(self, text: str) -> bool:
-        """Check if this text block is a references/bibliography section."""
-        first_lines = text[:500].lower()
-        return any(kw in first_lines for kw in ["references", "bibliography", "works cited"])
+        content = re.sub(r"\\\[(.*?)\\\]", replace_bracket_display, content, flags=re.DOTALL)
 
-    def _is_citation_entry(self, para: str) -> bool:
-        """Check if paragraph looks like a citation/reference entry."""
-        # Citations typically start with [N], author names, or year patterns
-        if re.match(r"^\[\d+\]", para):  # [1], [2], etc.
-            return True
-        if re.match(r"^[A-Z][a-z]+,\s+[A-Z]\.", para):  # Author, A.
-            return True
-        if re.match(r"^[A-Z][a-z]+\s+[A-Z][a-z]+", para) and "(" in para[:50]:  # Name Name (Year)
-            return True
-        return False
+        return content
 
-    def _format_citation(self, para: str) -> str:
-        """Format a citation entry with proper styling."""
-        # Escape HTML but preserve structure
-        escaped = self._escape_html(para)
-        # Add citation class for CSS styling
-        return f'<p class="citation">{escaped}</p>'
-
-    def _split_paragraphs(self, text: str) -> List[str]:
+    def write(self, output_path: Optional[Path] = None):
         """
-        Split text into paragraphs using multiple detection strategies.
+        Write EPUB to file.
 
-        Strategies:
-        1. Double newlines (standard paragraph breaks)
-        2. Lines ending with period followed by newline and capital letter
-        3. Significant indent changes
-        4. Short lines followed by longer lines (often indicates paragraph end)
+        Args:
+            output_path: Path to save EPUB file (overrides init path)
         """
-        # Normalize line endings
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        if output_path is None:
+            output_path = self.output_path
 
-        # First pass: split on obvious paragraph breaks (double+ newlines)
-        chunks = re.split(r"\n\s*\n+", text)
+        if output_path is None:
+            raise ValueError("No output path specified")
 
-        result = []
-        for chunk in chunks:
-            # Second pass: detect sentence-based paragraph breaks within chunks
-            lines = chunk.split("\n")
-            current_para = []
+        # Ensure parent directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            for i, line in enumerate(lines):
-                stripped = line.strip()
-                if not stripped:
-                    continue
+        # Write EPUB
+        epub.write_epub(str(output_path), self.book, {})
 
-                # Add line to current paragraph
-                current_para.append(stripped)
+        logger.info(f"EPUB written: {output_path}")
 
-                # Check if this looks like end of paragraph
-                is_para_end = False
-
-                # Pattern 1: Line ends with sentence-ending punctuation
-                ends_sentence = stripped.endswith((".", "!", "?", ':"', '."', ".'"))
-
-                # Pattern 2: Next line starts with capital (new sentence/paragraph)
-                next_starts_capital = False
-                if i + 1 < len(lines):
-                    next_line = lines[i + 1].strip()
-                    if next_line and next_line[0].isupper():
-                        next_starts_capital = True
-
-                # Pattern 3: Current line is short relative to average
-                is_short_line = len(stripped) < 50
-
-                # Pattern 4: Line looks like a list item or heading
-                is_list_or_heading = (
-                    stripped.startswith(("•", "-", "*", "–", "—"))
-                    or re.match(r"^\d+[\.\)]\s", stripped)
-                    or re.match(r"^[A-Z][A-Z\s]+$", stripped)  # ALL CAPS
-                )
-
-                # Decide if paragraph ends here
-                if ends_sentence and is_short_line and next_starts_capital:
-                    is_para_end = True
-                elif is_list_or_heading and current_para:
-                    # List items become their own paragraphs
-                    if len(current_para) > 1:
-                        # Save previous content as paragraph
-                        result.append(" ".join(current_para[:-1]))
-                        current_para = [stripped]
-                    is_para_end = True
-
-                if is_para_end and current_para:
-                    result.append(" ".join(current_para))
-                    current_para = []
-
-            # Don't forget remaining content
-            if current_para:
-                result.append(" ".join(current_para))
-
-        return [p for p in result if p.strip()]
-
-    def _detect_heading(self, text: str) -> Optional[int]:
+    @staticmethod
+    def _escape_html(text: str) -> str:
         """
-        Detect if text is a heading and return its level.
+        Escape HTML special characters.
+
+        Args:
+            text: Plain text
 
         Returns:
-            Heading level (2-4) or None if not a heading.
-            Level 2 for major sections, 3 for subsections, 4 for subsubsections.
+            HTML-escaped text
         """
-        text_stripped = text.strip()
-
-        # Must be reasonably short to be a heading
-        if len(text_stripped) > 80:
-            return None
-
-        # Must not end with common sentence punctuation (list items often end with comma/period)
-        if text_stripped.endswith((",", ";", ":", "?", "!")):
-            return None
-
-        # If ends with period, only accept if it's section number period (e.g., "1. Intro")
-        # Not a sentence ending (e.g., "1. Read these documents.")
-        if text_stripped.endswith("."):
-            # Only allow if pattern is "N. Title" and title is short (2-4 words)
-            if not re.match(r"^\d+\.\s+[A-Z][a-z]+(?:\s+[A-Za-z]+){0,3}$", text_stripped):
-                return None
-
-        # Subsubsection: "4.1.1 Title" or "4.1.1. Title"
-        if re.match(r"^\d+\.\d+\.\d+\.?\s+[A-Z][A-Za-z]", text_stripped):
-            words = text_stripped.split()
-            if len(words) <= 10:
-                return 4
-
-        # Subsection: "2.1 Title" or "2.1. Title"
-        if re.match(r"^\d+\.\d+\.?\s+[A-Z][A-Za-z]", text_stripped):
-            words = text_stripped.split()
-            if len(words) <= 10:
-                return 3
-
-        # Major section: "1. Title" or "1 Title"
-        if re.match(r"^\d+\.?\s+[A-Z][A-Za-z]", text_stripped):
-            words = text_stripped.split()
-            # Must be title-like: 2-6 words
-            if 2 <= len(words) <= 6:
-                # Get the title part (after the number)
-                title_part = " ".join(words[1:]).lower()
-                # Exclude if looks like a numbered list/instruction (starts with verb)
-                verb_starts = [
-                    "read",
-                    "write",
-                    "use",
-                    "create",
-                    "make",
-                    "do",
-                    "see",
-                    "summarize",
-                    "interpret",
-                    "analyze",
-                    "check",
-                    "verify",
-                    "note",
-                    "ensure",
-                    "consider",
-                    "apply",
-                    "acknowledge",
-                ]
-                if not any(title_part.startswith(v) for v in verb_starts):
-                    return 2
-
-        # Standalone section names
-        text_lower = text_stripped.lower()
-        if text_lower in self.standalone_sections:
-            return 2
-
-        # Appendix sections: "Appendix A", "Appendix B. Tables", etc.
-        if re.match(r"^appendix\s+[a-z]\.?\s*", text_stripped, re.IGNORECASE):
-            return 2
-
-        return None
-
-    def _escape_html(self, text: str) -> str:
-        """Escape HTML special characters."""
         return (
             text.replace("&", "&amp;")
             .replace("<", "&lt;")
@@ -1012,116 +769,66 @@ class TextToHTMLConverter:
             .replace("'", "&#39;")
         )
 
+    @staticmethod
+    def _sanitize_filename(name: str) -> str:
+        """
+        Sanitize string for use as filename.
 
-def create_epub_from_pdf_result(
-    pdf_result: Dict,
+        Args:
+            name: Original name
+
+        Returns:
+            Sanitized filename (lowercase, alphanumeric + hyphens)
+        """
+        # Convert to lowercase
+        name = name.lower()
+
+        # Replace spaces with hyphens
+        name = name.replace(" ", "-")
+
+        # Keep only alphanumeric and hyphens
+        name = "".join(c for c in name if c.isalnum() or c == "-")
+
+        # Remove consecutive hyphens
+        while "--" in name:
+            name = name.replace("--", "-")
+
+        # Trim hyphens from ends
+        name = name.strip("-")
+
+        # Limit length
+        if len(name) > 50:
+            name = name[:50].rstrip("-")
+
+        return name or "chapter"
+
+
+def build_epub(
+    latex_doc: LaTeXDocument,
     output_path: Path,
-    title: Optional[str] = None,
-    authors: Optional[List[str]] = None,
+    metadata: Optional[EPUBMetadata] = None,
 ) -> Path:
     """
-    Create an EPUB from PDF parsing results.
+    Convenience function to build EPUB from LaTeX document.
 
     Args:
-        pdf_result: Result from PDFParser.parse()
-        output_path: Path to save EPUB
-        title: Override title (defaults to PDF filename)
-        authors: List of authors
+        latex_doc: Parsed LaTeX document
+        output_path: Path to save EPUB file
+        metadata: Optional EPUB metadata (will use LaTeX metadata if None)
 
     Returns:
         Path to created EPUB file
     """
-    # Initialize builder
-    builder = EPUBBuilder()
-    converter = TextToHTMLConverter()
+    # Create metadata from LaTeX if not provided
+    if metadata is None:
+        metadata = EPUBMetadata(
+            title=latex_doc.title or "Untitled",
+            authors=latex_doc.authors or [],
+            description=latex_doc.abstract,
+        )
 
-    # Extract title from filename if not provided
-    if not title:
-        output_dir = pdf_result.get("output_dir")
-        if output_dir:
-            title = Path(output_dir).stem.replace("_extracted", "")
-        else:
-            title = "Converted Document"
+    builder = EPUBBuilder(metadata, output_path)
+    builder.build_from_latex(latex_doc)
+    builder.write()
 
-    # Set metadata
-    builder.set_metadata(
-        title=title,
-        authors=authors or [],
-        language="en",
-    )
-
-    # Add title page
-    builder.add_title_page()
-
-    # Get images for chapters
-    images = pdf_result.get("images", [])
-    images_by_page = {}
-    for img in images:
-        page_num = img.get("page_num", 0)
-        if page_num not in images_by_page:
-            images_by_page[page_num] = []
-        images_by_page[page_num].append(img)
-
-    # Process pages into chapters
-    pages = pdf_result.get("pages", [])
-
-    if not pages:
-        # No pages, create a single chapter
-        builder.add_chapter("Content", "<p>No content available.</p>")
-    else:
-        # Group pages into chapters (can be customized)
-        # For now, create one chapter per page or combine small pages
-        combined_text = ""
-        current_images = []
-
-        for page in pages:
-            page_num = page.get("page_num", 0)
-            text = page.get("text", "")
-
-            # Add images from this page
-            if page_num in images_by_page:
-                for img_info in images_by_page[page_num]:
-                    img_path = img_info.get("image_path")
-                    if img_path:
-                        current_images.append((Path(img_path), f"Figure from page {page_num}"))
-
-            combined_text += text + "\n\n"
-
-        # Convert all text to HTML
-        html_content = converter.convert(combined_text, current_images)
-
-        # Add as single chapter (or split by detected headings)
-        builder.add_chapter("Content", html_content)
-
-    # Build EPUB
-    return builder.build(output_path)
-
-
-# Example usage
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG)
-
-    # Create a test EPUB
-    builder = EPUBBuilder()
-    builder.set_metadata(
-        title="Test Document",
-        authors=["John Doe", "Jane Smith"],
-        abstract="This is a test abstract for the document.",
-    )
-    builder.add_title_page()
-    builder.add_abstract_page()
-    builder.add_chapter(
-        "Introduction",
-        "<p>This is the introduction paragraph.</p>"
-        "<p>This is another paragraph with more content.</p>",
-    )
-    builder.add_chapter(
-        "Methods",
-        "<p>This section describes the methods used.</p>",
-    )
-    builder.add_chapter(
-        "Conclusion",
-        "<p>This is the conclusion of the document.</p>",
-    )
-    builder.build(Path("test_output.epub"))
-    print("Test EPUB created: test_output.epub")
+    return output_path

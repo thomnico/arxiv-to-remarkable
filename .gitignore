@@ -63,6 +63,9 @@ downloads/
 papers/
 *.pdf.processing
 
+# Demo output
+demo_output/
+
 # reMarkable credentials
 .remarkable_token
 remarkable_credentials.json
