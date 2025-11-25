@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 
 from ebooklib import epub
 
-from arxiv2rm.latex_processor import LaTeXDocument, Section
+from arxiv2rm.latex_processor import Figure, LaTeXDocument, Section, Table
 from arxiv2rm.math_renderer import MathFormula, MathRenderer
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,8 @@ class EPUBBuilder:
         self.render_math = render_math
         self.math_renderer = MathRenderer() if render_math else None
         self.rendered_math: Dict[str, Path] = {}  # formula_id -> image path
+        self.globally_placed_figures: set = set()  # Track figures placed in chapters
+        self.globally_placed_tables: set = set()  # Track tables placed in chapters
 
         # Generate UUID if not provided
         if not metadata.identifier:
@@ -247,7 +249,10 @@ class EPUBBuilder:
 
     def _build_chapter_html(self, main_section: Section, subsections: List[Section]) -> str:
         """
-        Build HTML content for a chapter.
+        Build HTML content for a chapter with inline figure/table placement.
+
+        Figures and tables are placed immediately after the paragraph where they
+        are first referenced, using <<<REF:label>>> markers in the content.
 
         Args:
             main_section: Main section
@@ -265,93 +270,112 @@ class EPUBBuilder:
             <h1>{self._escape_html(main_section.title)}</h1>
         """
 
-        # Main section content - split into paragraphs
-        if main_section.content:
-            paragraphs = main_section.content.split("\n\n")
+        # Track which figures/tables have been placed to avoid duplicates
+        placed_figures = set()
+        placed_tables = set()
+
+        # Helper function to process content with inline reference placement
+        def process_content_with_inline_refs(content: str) -> str:
+            if not content:
+                return ""
+
+            paragraphs = content.split("\n\n")
+            html_parts = []
+
             for para in paragraphs:
                 para = para.strip()
-                if para:
-                    html += f"<p>{self._escape_html(para)}</p>\n"
+                if not para:
+                    continue
 
-        # Add figures for this chapter (only figures that belong to this section)
-        if self.latex_doc and self.latex_doc.figures:
-            # Filter figures by section - include figures that match:
-            # 1. The main section title
-            # 2. Any subsection title in this chapter
-            # Build list of all section/subsection titles in this chapter
+                # Find all reference markers in this paragraph
+                refs_in_para = re.findall(r"<<<REF:([^>]+)>>>", para)
+
+                # Replace markers with readable text
+                for ref_label in refs_in_para:
+                    if ref_label.startswith("fig:"):
+                        fig_result = self._find_figure_by_label(ref_label)
+                        if fig_result:
+                            _, fig = fig_result
+                            para = para.replace(f"<<<REF:{ref_label}>>>", f"Figure {fig.number}")
+                        else:
+                            # Reference not found, just remove marker
+                            para = para.replace(f"<<<REF:{ref_label}>>>", "")
+                    elif ref_label.startswith("tab:"):
+                        table = self._find_table_by_label(ref_label)
+                        if table:
+                            para = para.replace(f"<<<REF:{ref_label}>>>", f"Table {table.number}")
+                        else:
+                            # Reference not found, just remove marker
+                            para = para.replace(f"<<<REF:{ref_label}>>>", "")
+
+                # Add paragraph HTML
+                html_parts.append(f"<p>{self._escape_html(para)}</p>\n")
+
+                # Check if this is the FIRST reference to any figure/table in this paragraph
+                for ref_label in refs_in_para:
+                    if ref_label.startswith("fig:"):
+                        fig_result = self._find_figure_by_label(ref_label)
+                        if fig_result:
+                            _, fig = fig_result
+                            if fig.number not in placed_figures:
+                                # Render and insert figure HTML immediately
+                                fig_html = self._render_figure_html(fig)
+                                if fig_html:
+                                    html_parts.append(fig_html)
+                                    placed_figures.add(fig.number)
+                                    self.globally_placed_figures.add(fig.number)
+
+                    elif ref_label.startswith("tab:"):
+                        table = self._find_table_by_label(ref_label)
+                        if table and table.number not in placed_tables:
+                            # Render and insert table HTML immediately
+                            table_html = self._render_table_html(table)
+                            if table_html:
+                                html_parts.append(table_html)
+                                placed_tables.add(table.number)
+                                self.globally_placed_tables.add(table.number)
+
+            return "".join(html_parts)
+
+        # Process main section content
+        html += process_content_with_inline_refs(main_section.content)
+
+        # Process subsections
+        for subsection in subsections:
+            heading_level = min(subsection.level, 6)  # h2-h6 (h1 is chapter title)
+            html += f"<h{heading_level}>{self._escape_html(subsection.title)}</h{heading_level}>\n"
+            html += process_content_with_inline_refs(subsection.content)
+
+        # Add any unplaced figures/tables that belong to this chapter at the end
+        # (fallback for figures without references or with broken references)
+        if self.latex_doc:
             chapter_section_titles = {main_section.title}
             for subsection in subsections:
                 chapter_section_titles.add(subsection.title)
 
-            chapter_figures = [
-                (idx, fig)
-                for idx, fig in enumerate(self.latex_doc.figures)
-                if fig.source_section in chapter_section_titles
-            ]
+            # Add unplaced figures
+            for fig in self.latex_doc.figures:
+                if (
+                    fig.source_section in chapter_section_titles
+                    and fig.number not in placed_figures
+                ):
+                    fig_html = self._render_figure_html(fig)
+                    if fig_html:
+                        html += fig_html
+                        placed_figures.add(fig.number)
+                        self.globally_placed_figures.add(fig.number)
 
-            for idx, figure in chapter_figures:
-                # Skip PDF figures - they can't be optimized by PIL
-                if figure.image_path and figure.image_path.endswith(".pdf"):
-                    logger.debug(f"Skipping PDF figure {figure.number}: {figure.image_path}")
-                    continue
-
-                # Determine image filename from figure's image_path
-                # Extract just the filename without extension and sanitize
-                if figure.image_path:
-                    # Handle paths like "Figures/ModalNet-21" -> "ModalNet_21_opt.jpg"
-                    from pathlib import Path
-
-                    img_stem = Path(figure.image_path).stem.replace("-", "_").replace(" ", "_")
-                    figure_filename = f"{img_stem}_opt.jpg"
-                else:
-                    # Fallback to index-based naming
-                    figure_filename = f"figure_{figure.number}_opt.jpg"
-
-                caption_text = f": {self._escape_html(figure.caption)}" if figure.caption else ""
-                html += f"""
-            <figure id="fig{figure.number}">
-                <img src="images/{figure_filename}" alt="Figure {figure.number}"/>
-                <figcaption>Figure {figure.number}{caption_text}</figcaption>
-            </figure>
-"""
-
-        # Add tables for this chapter (same filtering logic as figures)
-        if self.latex_doc and self.latex_doc.tables:
-            chapter_tables = [
-                table
-                for table in self.latex_doc.tables
-                if table.source_section in chapter_section_titles
-            ]
-
-            for table in chapter_tables:
-                from arxiv2rm.latex_processor import LaTeXProcessor
-
-                # Convert LaTeX tabular to HTML table
-                table_html = LaTeXProcessor.tabular_to_html(table.content)
-
-                # Replace math in table cells if math rendering is enabled
-                if self.render_math:
-                    table_html = self._replace_math_in_content(table_html)
-
-                caption_text = f": {self._escape_html(table.caption)}" if table.caption else ""
-                html += f"""
-            <div class="table-container" id="tab{table.number}">
-                <p class="table-caption">Table {table.number}{caption_text}</p>
-                {table_html}
-            </div>
-"""
-
-        # Subsections
-        for subsection in subsections:
-            heading_level = min(subsection.level, 6)  # h2-h6 (h1 is chapter title)
-            html += f"<h{heading_level}>{self._escape_html(subsection.title)}</h{heading_level}>\n"
-            if subsection.content:
-                # Split subsection content into paragraphs too
-                paragraphs = subsection.content.split("\n\n")
-                for para in paragraphs:
-                    para = para.strip()
-                    if para:
-                        html += f"<p>{self._escape_html(para)}</p>\n"
+            # Add unplaced tables
+            for table in self.latex_doc.tables:
+                if (
+                    table.source_section in chapter_section_titles
+                    and table.number not in placed_tables
+                ):
+                    table_html = self._render_table_html(table)
+                    if table_html:
+                        html += table_html
+                        placed_tables.add(table.number)
+                        self.globally_placed_tables.add(table.number)
 
         # Add notes section at the end of the chapter
         html += self._build_notes_section()
@@ -366,6 +390,100 @@ class EPUBBuilder:
             html = self._replace_math_in_content(html)
 
         return html
+
+    def _render_figure_html(self, figure: Figure) -> str:
+        """
+        Render a single figure as HTML.
+
+        Args:
+            figure: Figure object to render
+
+        Returns:
+            HTML string for the figure
+        """
+        from pathlib import Path
+
+        # Skip PDF figures
+        if figure.image_path and figure.image_path.endswith(".pdf"):
+            return ""
+
+        # Determine image filename
+        if figure.image_path:
+            img_stem = Path(figure.image_path).stem.replace("-", "_").replace(" ", "_")
+            figure_filename = f"{img_stem}_opt.jpg"
+        else:
+            figure_filename = f"figure_{figure.number}_opt.jpg"
+
+        caption_text = f": {self._escape_html(figure.caption)}" if figure.caption else ""
+
+        return f"""
+            <figure id="fig{figure.number}">
+                <img src="images/{figure_filename}" alt="Figure {figure.number}"/>
+                <figcaption>Figure {figure.number}{caption_text}</figcaption>
+            </figure>
+"""
+
+    def _render_table_html(self, table: Table) -> str:
+        """
+        Render a single table as HTML (as image if available).
+
+        Args:
+            table: Table object to render
+
+        Returns:
+            HTML string for the table
+        """
+        # Only render tables that have been converted to images
+        if not table.image_path:
+            return ""
+
+        table_filename = f"table_{table.number}.png"
+        caption_text = f": {self._escape_html(table.caption)}" if table.caption else ""
+
+        return f"""
+            <figure class="table-figure" id="tab{table.number}">
+                <img src="images/{table_filename}" alt="Table {table.number}"/>
+                <figcaption>Table {table.number}{caption_text}</figcaption>
+            </figure>
+"""
+
+    def _find_figure_by_label(self, label: str) -> Optional[tuple[int, Figure]]:
+        """
+        Find figure by label.
+
+        Args:
+            label: Figure label (e.g., "fig:architecture")
+
+        Returns:
+            Tuple of (index, Figure) or None if not found
+        """
+        if not self.latex_doc:
+            return None
+
+        for idx, fig in enumerate(self.latex_doc.figures):
+            if fig.label == label:
+                return (idx, fig)
+
+        return None
+
+    def _find_table_by_label(self, label: str) -> Optional[Table]:
+        """
+        Find table by label.
+
+        Args:
+            label: Table label (e.g., "tab:results")
+
+        Returns:
+            Table object or None if not found
+        """
+        if not self.latex_doc:
+            return None
+
+        for table in self.latex_doc.tables:
+            if table.label == label:
+                return table
+
+        return None
 
     def _add_figures_tables_appendix(self):
         """
@@ -383,18 +501,20 @@ class EPUBBuilder:
             if section.level == 1:
                 used_sections.add(section.title)
 
-        # Find unmatched figures (source_section=None or not in used_sections)
+        # Find unmatched figures that were NOT already placed in chapters
         unmatched_figures = [
             fig
             for fig in self.latex_doc.figures
-            if not fig.source_section or fig.source_section not in used_sections
+            if (not fig.source_section or fig.source_section not in used_sections)
+            and fig.number not in self.globally_placed_figures
         ]
 
-        # Find unmatched tables (source_section=None or not in used_sections)
+        # Find unmatched tables that were NOT already placed in chapters
         unmatched_tables = [
             table
             for table in self.latex_doc.tables
-            if not table.source_section or table.source_section not in used_sections
+            if (not table.source_section or table.source_section not in used_sections)
+            and table.number not in self.globally_placed_tables
         ]
 
         # Only create appendix if there are unmatched items
@@ -503,10 +623,7 @@ class EPUBBuilder:
         for i in range(8):  # 8 ruled lines for notes
             lines.append(f'<div class="notes-line" style="{line_style}"></div>')
 
-        notes_style = (
-            "margin-top: 4em; padding-top: 1em; "
-            "border-top: 2px solid #000000; page-break-inside: avoid;"
-        )
+        notes_style = "margin-top: 4em; padding-top: 1em; " "border-top: 2px solid #000000;"
         label_style = "font-size: 10pt; font-style: italic; " "color: #666666; margin-bottom: 1em;"
 
         notes_html = f"""
