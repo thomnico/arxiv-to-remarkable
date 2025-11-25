@@ -8,6 +8,7 @@ import click
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.progress import Progress
+from rich.table import Table
 
 from arxiv2rm import __version__
 from arxiv2rm.config import ConfigLoader, get_config
@@ -72,22 +73,40 @@ def main(ctx, config_file, log_level):
 @main.command()
 @click.argument("url_or_path")
 @click.option("--output", "-o", help="Output file path")
-@click.option("--format", default="epub", help="Output format (epub)")
-@click.option("--ocr-engine", help="OCR engine (groq, tesseract)")
-@click.option("--image-quality", type=int, help="JPEG quality (1-100)")
+@click.option("--format", "output_format", default="epub", help="Output format (epub)")
+@click.option("--ocr-engine", default="local", help="OCR engine (local, groq, tesseract)")
+@click.option("--image-quality", type=int, default=85, help="JPEG quality (1-100)")
+@click.option("--title", help="Override document title")
+@click.option("--author", multiple=True, help="Author name (can be repeated)")
+@click.option("--columns/--no-columns", default=True, help="Enable column detection")
 @click.option("--remarkable-folder", help="reMarkable folder")
 @click.option("--upload/--no-upload", default=None, help="Upload to reMarkable")
 @click.pass_context
-def convert(ctx, url_or_path, output, format, ocr_engine, image_quality, remarkable_folder, upload):
+def convert(
+    ctx,
+    url_or_path,
+    output,
+    output_format,
+    ocr_engine,
+    image_quality,
+    title,
+    author,
+    columns,
+    remarkable_folder,
+    upload,
+):
     """Convert a paper to EPUB format.
 
     \b
     Examples:
-        arxiv2rm convert https://arxiv.org/abs/2301.12345
+        arxiv2rm convert paper.pdf
         arxiv2rm convert paper.pdf --output custom.epub
-        arxiv2rm convert paper.pdf --upload
+        arxiv2rm convert paper.pdf --title "My Paper" --author "John Doe"
+        arxiv2rm convert paper.pdf --no-columns  # Disable column detection
     """
-    logger = logging.getLogger(__name__)
+    from arxiv2rm.converter import ConversionOptions, PDFToEPUBConverter
+    from arxiv2rm.image_optimizer import RemarkableDevice
+
     config = ctx.obj.get("config")
 
     # Use config values as defaults if not specified
@@ -98,19 +117,91 @@ def convert(ctx, url_or_path, output, format, ocr_engine, image_quality, remarka
         if upload is None:
             upload = config.remarkable.auto_upload
 
-    console.print(f"[bold blue]Converting:[/bold blue] {url_or_path}")
-    console.print(f"[dim]Format: {format}[/dim]")
+    # Check if input is URL or file path
+    input_path = Path(url_or_path)
+    is_url = url_or_path.startswith(("http://", "https://", "arxiv:"))
+
+    if is_url:
+        console.print(
+            "[yellow]URL download not yet implemented. Please provide a local PDF.[/yellow]"
+        )
+        console.print("[dim]Use: arxiv2rm convert paper.pdf[/dim]")
+        sys.exit(1)
+
+    if not input_path.exists():
+        console.print(f"[red]Error:[/red] File not found: {url_or_path}")
+        sys.exit(1)
+
+    if not input_path.suffix.lower() == ".pdf":
+        console.print(f"[yellow]Warning:[/yellow] Expected PDF file, got {input_path.suffix}")
+
+    # Determine output path
+    output_path = Path(output) if output else input_path.with_suffix(".epub")
+
+    console.print(f"[bold blue]Converting:[/bold blue] {input_path.name}")
+    console.print(f"[dim]Output: {output_path}[/dim]")
     console.print(f"[dim]OCR Engine: {ocr_engine}[/dim]")
     console.print(f"[dim]Image Quality: {image_quality}[/dim]")
+    console.print(f"[dim]Column Detection: {'enabled' if columns else 'disabled'}[/dim]")
 
-    with Progress(console=console) as progress:
-        task = progress.add_task("[cyan]Converting...", total=100)
-        progress.update(task, advance=10)
-        logger.info(f"Starting conversion of {url_or_path}")
+    # Configure conversion options
+    options = ConversionOptions(
+        output_path=output_path,
+        title=title,
+        authors=list(author) if author else None,
+        optimize_images=True,
+        image_quality=image_quality,
+        device=RemarkableDevice.REMARKABLE_1,
+        detect_columns=columns,
+        ocr_engine=ocr_engine,
+        include_title_page=True,
+    )
+
+    # Run conversion
+    converter = PDFToEPUBConverter(options)
+
+    with Progress(console=console, transient=True) as progress:
+        task = progress.add_task("[cyan]Converting PDF to EPUB...", total=100)
+
+        # Step 1: Analysis
+        progress.update(task, description="[cyan]Analyzing PDF...", advance=10)
+        result = converter.convert(input_path, output_path)
         progress.update(task, advance=90)
 
-    console.print("[yellow]This feature is not yet implemented.[/yellow]")
-    logger.warning("Conversion feature not yet implemented")
+    if result.success:
+        console.print("\n[bold green]Conversion successful![/bold green]")
+        console.print(f"[green]Output:[/green] {result.epub_path}")
+
+        # Show stats
+        stats = result.stats
+        table = Table(title="Conversion Statistics")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="white")
+
+        table.add_row("Pages", str(stats.get("pages", "N/A")))
+        table.add_row("Images", str(stats.get("images", "N/A")))
+        table.add_row("Optimized Images", str(stats.get("optimized_images", "N/A")))
+        table.add_row("Chapters", str(stats.get("chapters", "N/A")))
+        table.add_row("Two-Column Layout", "Yes" if stats.get("is_two_column") else "No")
+        table.add_row("OCR Required", "Yes" if stats.get("needs_ocr") else "No")
+        table.add_row(
+            "Input Size",
+            f"{stats.get('input_size_kb', 0):.1f} KB",
+        )
+        table.add_row(
+            "Output Size",
+            f"{stats.get('output_size_kb', 0):.1f} KB",
+        )
+
+        console.print(table)
+
+        # Upload to reMarkable if requested
+        if upload:
+            console.print("\n[yellow]reMarkable upload not yet implemented.[/yellow]")
+    else:
+        console.print("\n[bold red]Conversion failed![/bold red]")
+        console.print(f"[red]Error:[/red] {result.error}")
+        sys.exit(1)
 
 
 @main.command()
@@ -244,6 +335,154 @@ def config_cmd(ctx, show, init, path):
         console.print("  --show    Show current configuration")
         console.print("  --init    Create default config file")
         console.print("  --path    Show config file path")
+
+
+@main.command()
+@click.argument("pdf_path", type=click.Path(exists=True))
+@click.option("--columns/--no-columns", default=True, help="Enable column detection")
+@click.option("--output", "-o", type=click.Path(), help="Save analysis to JSON file")
+@click.option("--preview", is_flag=True, help="Show text preview of first page")
+@click.pass_context
+def analyze(ctx, pdf_path, columns, output, preview):
+    """Analyze a PDF document structure.
+
+    Detects column layout, text/image ratio, and OCR requirements.
+
+    \b
+    Examples:
+        arxiv2rm analyze paper.pdf
+        arxiv2rm analyze paper.pdf --preview
+        arxiv2rm analyze paper.pdf --output analysis.json
+        arxiv2rm analyze paper.pdf --no-columns
+    """
+    import json
+
+    from arxiv2rm.column_detector import ColumnAwareExtractor
+    from arxiv2rm.pdf_parser import PDFParser
+
+    logger = logging.getLogger(__name__)
+    pdf_path = Path(pdf_path)
+
+    console.print(f"[bold blue]Analyzing:[/bold blue] {pdf_path.name}")
+
+    try:
+        # Initialize parser with column detection
+        parser = PDFParser(detect_columns=columns)
+
+        with Progress(console=console) as progress:
+            task = progress.add_task("[cyan]Analyzing PDF...", total=100)
+
+            # Step 1: Basic analysis
+            progress.update(task, description="[cyan]Analyzing PDF structure...")
+            analysis = parser.analyze_pdf(pdf_path)
+            progress.update(task, advance=50)
+
+            # Step 2: Column-aware extraction (if enabled and has text)
+            if columns and not analysis["needs_ocr"]:
+                progress.update(task, description="[cyan]Detecting columns...")
+                extractor = ColumnAwareExtractor()
+                doc_analysis = extractor.analyze_document(pdf_path)
+                analysis["column_analysis"] = doc_analysis
+            progress.update(task, advance=50)
+
+        # Display results
+        console.print("\n[bold green]Analysis Complete[/bold green]\n")
+
+        # Basic stats table
+        table = Table(title="Document Structure")
+        table.add_column("Property", style="cyan")
+        table.add_column("Value", style="white")
+
+        table.add_row("Pages", str(analysis["page_count"]))
+        table.add_row("Pages with text", str(analysis["pages_with_text"]))
+        table.add_row("Images", str(analysis["image_count"]))
+        table.add_row("Text ratio", f"{analysis['text_ratio']:.1%}")
+        table.add_row("Is scanned", "Yes" if analysis["is_scanned"] else "No")
+        table.add_row("Needs OCR", "Yes" if analysis["needs_ocr"] else "No")
+
+        console.print(table)
+
+        # Column layout table (if available)
+        if "column_layout" in analysis:
+            col_info = analysis["column_layout"]
+
+            console.print()
+            col_table = Table(title="Column Layout")
+            col_table.add_column("Property", style="cyan")
+            col_table.add_column("Value", style="white")
+
+            col_table.add_row("Dominant layout", f"{col_info['dominant_columns']} column(s)")
+            col_table.add_row("Two-column pages", str(col_info["two_column_pages"]))
+            col_table.add_row("Is two-column", "Yes" if col_info["is_two_column"] else "No")
+            col_table.add_row("Mixed layout", "Yes" if col_info["mixed_layout"] else "No")
+
+            # Distribution
+            dist_str = ", ".join(
+                f"{count}-col: {num}" for count, num in sorted(col_info["distribution"].items())
+            )
+            col_table.add_row("Distribution", dist_str)
+
+            console.print(col_table)
+
+        # First page special (if available)
+        if "column_analysis" in analysis:
+            col_analysis = analysis["column_analysis"]
+            if col_analysis.get("first_page_special"):
+                console.print(
+                    "\n[dim]Note: First page has different layout (likely title page)[/dim]"
+                )
+
+        # Preview first page text
+        if preview and not analysis["needs_ocr"]:
+            console.print("\n[bold cyan]First Page Preview:[/bold cyan]")
+            console.print("[dim]─" * 60 + "[/dim]")
+
+            if columns:
+                extractor = ColumnAwareExtractor()
+                pages = extractor.extract_text(pdf_path)
+                if pages:
+                    preview_text = pages[0]["text"][:800]
+                    console.print(preview_text)
+                    if len(pages[0]["text"]) > 800:
+                        console.print("[dim]... (truncated)[/dim]")
+            else:
+                pages = parser.extract_text_pdfplumber(pdf_path)
+                if pages:
+                    preview_text = pages[0]["text"][:800]
+                    console.print(preview_text)
+                    if len(pages[0]["text"]) > 800:
+                        console.print("[dim]... (truncated)[/dim]")
+
+            console.print("[dim]─" * 60 + "[/dim]")
+
+        # Save to JSON if requested
+        if output:
+            output_path = Path(output)
+            # Convert any non-serializable objects
+            serializable = {
+                k: v
+                for k, v in analysis.items()
+                if isinstance(v, (str, int, float, bool, dict, list, type(None)))
+            }
+            with open(output_path, "w") as f:
+                json.dump(serializable, f, indent=2)
+            console.print(f"\n[green]Analysis saved to:[/green] {output_path}")
+
+        # Recommendations
+        console.print("\n[bold cyan]Recommendations:[/bold cyan]")
+        if analysis["needs_ocr"]:
+            console.print("  • OCR required for this document")
+            console.print("  • Use: arxiv2rm convert paper.pdf --ocr-engine groq")
+        elif analysis.get("column_layout", {}).get("is_two_column"):
+            console.print("  • Two-column layout detected")
+            console.print("  • Column-aware extraction will be used automatically")
+        else:
+            console.print("  • Single-column layout - standard extraction")
+
+    except Exception as e:
+        logger.error(f"Analysis failed: {e}")
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
