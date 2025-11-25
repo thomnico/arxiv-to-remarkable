@@ -696,6 +696,11 @@ class LaTeXProcessor:
         content = re.sub(r"\\emph\{([^}]+)\}", r"<em>\1</em>", content)
         content = re.sub(r"\\boldmath", "", content)
 
+        # Handle old TeX syntax: {\bf text}, {\it text}, {\em text}
+        content = re.sub(r"\{\\bf\s+([^}]+)\}", r"<strong>\1</strong>", content)
+        content = re.sub(r"\{\\it\s+([^}]+)\}", r"<em>\1</em>", content)
+        content = re.sub(r"\{\\em\s+([^}]+)\}", r"<em>\1</em>", content)
+
         # Clean up extra whitespace and empty braces
         content = re.sub(r"\{\s*\}", "", content)
         content = re.sub(r"\s+", " ", content)
