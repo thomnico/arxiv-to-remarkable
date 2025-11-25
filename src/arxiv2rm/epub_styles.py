@@ -121,7 +121,6 @@ li {
 figure {
     margin: 1.5em 0;
     text-align: center;
-    page-break-inside: avoid;
 }
 
 img {
@@ -145,7 +144,6 @@ table {
     margin: 1.5em auto;
     border-collapse: collapse;
     width: 100%;
-    page-break-inside: avoid;
     font-size: 12pt;
 }
 
@@ -182,7 +180,6 @@ td:has(img) {
 /* Table container */
 .table-container {
     margin: 2em 0;
-    page-break-inside: avoid;
 }
 
 .table-caption {
@@ -202,7 +199,6 @@ pre {
     border: 1px solid #000000;
     background-color: #F8F8F8;
     overflow-x: auto;
-    page-break-inside: avoid;
 }
 
 code {
@@ -261,7 +257,7 @@ em, i {
 
 /* Avoid orphans and widows */
 h1, h2, h3, h4, h5, h6 {
-    page-break-inside: avoid;
+    page-break-after: avoid;
 }
 
 /* Navigation */
@@ -312,7 +308,6 @@ nav li {
     margin-top: 4em;
     padding-top: 1em;
     border-top: 2px solid #000000;
-    page-break-inside: avoid;
 }
 
 .notes-line {
