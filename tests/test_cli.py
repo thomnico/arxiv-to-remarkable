@@ -81,12 +81,13 @@ def test_config_path(runner):
 
 
 def test_convert_with_url(runner, monkeypatch):
-    """Test convert command with URL."""
+    """Test convert command with URL (not yet implemented)."""
     monkeypatch.setenv("GROQ_API_KEY", "gsk_test_convert")
 
     result = runner.invoke(main, ["convert", "https://arxiv.org/abs/2301.12345"])
-    assert result.exit_code == 0
-    assert "converting" in result.output.lower()
+    # URL download not yet implemented, should show warning and exit
+    assert result.exit_code == 1
+    assert "url download not yet implemented" in result.output.lower()
 
 
 def test_batch_command(runner, temp_batch_file, monkeypatch):
