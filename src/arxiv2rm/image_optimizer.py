@@ -1,356 +1,342 @@
-"""Image optimization for reMarkable e-ink display."""
+"""
+Image Optimizer for reMarkable e-ink display.
+
+Optimizes images for reMarkable's e-ink display:
+- Resize to fit reMarkable 1 (1404×1872px) or reMarkable 2 (1872×2480px)
+- Convert to grayscale (e-ink displays are grayscale)
+- Enhance contrast for better e-ink rendering
+- Optional dithering for photographs
+- Compress to target file size (<500KB)
+- Add EXIF metadata
+"""
 
 import logging
 from dataclasses import dataclass
+from enum import Enum
+from io import BytesIO
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
-import cv2
-import numpy as np
-import piexif
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageOps
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class ImageMetadata:
-    """Metadata to embed in optimized images."""
+class RemarkableDevice(Enum):
+    """reMarkable device specifications."""
 
-    source_page: Optional[int] = None
-    figure_number: Optional[int] = None
-    caption: Optional[str] = None
-    source_file: Optional[str] = None
-    processed_date: Optional[str] = None
+    REMARKABLE_1 = (1404, 1872)
+    REMARKABLE_2 = (1872, 2480)
+
+
+@dataclass
+class OptimizationSettings:
+    """Settings for image optimization."""
+
+    device: RemarkableDevice = RemarkableDevice.REMARKABLE_1
+    quality: int = 85  # JPEG quality (1-100)
+    max_file_size_kb: int = 500  # Target max file size in KB
+    contrast_factor: float = 1.2  # Contrast enhancement (1.0 = no change)
+    sharpness_factor: float = 1.1  # Sharpness enhancement
+    dither: bool = False  # Apply Floyd-Steinberg dithering
+    grayscale: bool = True  # Convert to grayscale
+    maintain_aspect: bool = True  # Maintain aspect ratio
 
 
 class ImageOptimizer:
-    """Optimize images for reMarkable e-ink display."""
+    """
+    Optimizes images for reMarkable e-ink display.
 
-    # reMarkable 1 display resolution (portrait)
-    REMARKABLE_WIDTH = 1404
-    REMARKABLE_HEIGHT = 1872
+    Usage:
+        optimizer = ImageOptimizer()
+        result = optimizer.optimize("input.png", "output.jpg")
+    """
 
-    # reMarkable 2 has same resolution
-    # Target dimensions for optimization
-    TARGET_WIDTH = REMARKABLE_WIDTH
-    TARGET_HEIGHT = REMARKABLE_HEIGHT
-
-    def __init__(
-        self,
-        target_width: int = TARGET_WIDTH,
-        target_height: int = TARGET_HEIGHT,
-        quality: int = 85,
-        optimize_eink: bool = True,
-    ):
+    def __init__(self, settings: Optional[OptimizationSettings] = None):
         """
         Initialize image optimizer.
 
         Args:
-            target_width: Target width in pixels (default: 1404 for reMarkable)
-            target_height: Target height in pixels (default: 1872 for reMarkable)
-            quality: JPEG quality 1-100 (default: 85)
-            optimize_eink: Apply e-ink optimizations (default: True)
+            settings: Optimization settings (uses defaults if not provided)
         """
-        self.target_width = target_width
-        self.target_height = target_height
-        self.quality = quality
-        self.optimize_eink = optimize_eink
-        logger.info(
-            f"ImageOptimizer initialized: {target_width}×{target_height}, "
-            f"quality={quality}, e-ink={optimize_eink}"
-        )
+        self.settings = settings or OptimizationSettings()
 
     def optimize(
         self,
         input_path: Path,
         output_path: Optional[Path] = None,
-        metadata: Optional[ImageMetadata] = None,
+        settings: Optional[OptimizationSettings] = None,
     ) -> Path:
         """
-        Optimize image for reMarkable display.
+        Optimize an image for reMarkable.
 
         Args:
             input_path: Path to input image
-            output_path: Path to save optimized image (default: input_path with _opt suffix)
-            metadata: Optional metadata to embed in EXIF
+            output_path: Path for output (defaults to input_path with .jpg suffix)
+            settings: Override settings for this operation
 
         Returns:
             Path to optimized image
-
-        Raises:
-            ValueError: If image cannot be processed
         """
+        input_path = Path(input_path)
+        settings = settings or self.settings
+
         if not input_path.exists():
-            raise ValueError(f"Input image not found: {input_path}")
+            raise FileNotFoundError(f"Image not found: {input_path}")
 
         # Default output path
         if output_path is None:
-            output_path = input_path.parent / f"{input_path.stem}_opt.jpg"
+            output_path = input_path.with_suffix(".optimized.jpg")
+        output_path = Path(output_path)
 
-        logger.info(f"Optimizing {input_path.name} → {output_path.name}")
+        logger.info(f"Optimizing image: {input_path.name}")
 
-        try:
-            # Load image
-            img = Image.open(input_path)
-            logger.debug(f"Loaded image: {img.size} ({img.mode})")
+        # Open image
+        img = Image.open(input_path)
+        original_size = input_path.stat().st_size
 
-            # Convert to RGB if needed
-            if img.mode not in ("RGB", "L"):
-                img = img.convert("RGB")
-                logger.debug("Converted to RGB mode")
+        # Convert to RGB if necessary (for JPEG output)
+        if img.mode in ("RGBA", "P"):
+            # Create white background for transparency
+            background = Image.new("RGB", img.size, (255, 255, 255))
+            if img.mode == "RGBA":
+                background.paste(img, mask=img.split()[3])  # Use alpha channel as mask
+            else:
+                background.paste(img)
+            img = background
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
 
-            # Resize with aspect ratio preservation
-            img = self._resize_image(img)
+        # Get target dimensions
+        target_width, target_height = settings.device.value
 
-            # Apply e-ink optimizations
-            if self.optimize_eink:
-                img = self._optimize_for_eink(img)
+        # Resize if necessary
+        img = self._resize_image(img, target_width, target_height, settings.maintain_aspect)
 
-            # Save with EXIF metadata
-            save_kwargs = {
-                "format": "JPEG",
-                "quality": self.quality,
-                "optimize": True,
-            }
+        # Convert to grayscale for e-ink
+        if settings.grayscale:
+            img = ImageOps.grayscale(img)
+            img = img.convert("RGB")  # Convert back to RGB for saving
 
-            if metadata:
-                exif_bytes = self._create_exif(metadata)
-                if exif_bytes:  # Only add exif if not empty
-                    save_kwargs["exif"] = exif_bytes
+        # Enhance contrast
+        if settings.contrast_factor != 1.0:
+            enhancer = ImageEnhance.Contrast(img)
+            img = enhancer.enhance(settings.contrast_factor)
 
-            img.save(output_path, **save_kwargs)
+        # Enhance sharpness
+        if settings.sharpness_factor != 1.0:
+            enhancer = ImageEnhance.Sharpness(img)
+            img = enhancer.enhance(settings.sharpness_factor)
 
-            # Log results
-            input_size = input_path.stat().st_size
-            output_size = output_path.stat().st_size
-            compression_ratio = (1 - output_size / input_size) * 100
-            logger.info(
-                f"Saved: {output_size // 1024}KB "
-                f"(was {input_size // 1024}KB, {compression_ratio:.1f}% reduction)"
-            )
+        # Apply dithering for photographs (reduces banding on e-ink)
+        if settings.dither:
+            img = self._apply_dithering(img)
 
-            return output_path
+        # Save with progressive quality reduction to meet file size target
+        output_path = self._save_with_size_limit(
+            img,
+            output_path,
+            settings.quality,
+            settings.max_file_size_kb,
+        )
 
-        except Exception as e:
-            logger.error(f"Failed to optimize {input_path}: {e}")
-            raise ValueError(f"Image optimization failed: {e}") from e
+        final_size = output_path.stat().st_size
+        reduction = (1 - final_size / original_size) * 100 if original_size > 0 else 0
 
-    def _resize_image(self, img: Image.Image) -> Image.Image:
+        logger.info(
+            f"Optimized: {input_path.name} -> {output_path.name} "
+            f"({original_size / 1024:.1f}KB -> {final_size / 1024:.1f}KB, "
+            f"{reduction:.1f}% reduction)"
+        )
+
+        return output_path
+
+    def _resize_image(
+        self,
+        img: Image.Image,
+        target_width: int,
+        target_height: int,
+        maintain_aspect: bool,
+    ) -> Image.Image:
         """
-        Resize image to target dimensions with aspect ratio preservation.
-
-        Uses letterboxing (white borders) if needed.
+        Resize image to fit target dimensions.
 
         Args:
             img: PIL Image
+            target_width: Target width in pixels
+            target_height: Target height in pixels
+            maintain_aspect: Whether to maintain aspect ratio
 
         Returns:
-            Resized PIL Image
+            Resized image
         """
-        orig_width, orig_height = img.size
-        logger.debug(f"Original size: {orig_width}×{orig_height}")
+        original_width, original_height = img.size
 
-        # Check if image is landscape and should be rotated
-        if orig_width > orig_height and self.target_height > self.target_width:
-            # Landscape image for portrait display - consider rotating
-            # Calculate fit both ways
-            portrait_scale = min(self.target_width / orig_width, self.target_height / orig_height)
-            landscape_scale = min(self.target_height / orig_width, self.target_width / orig_height)
+        # Check if resize is needed
+        if original_width <= target_width and original_height <= target_height:
+            return img
 
-            # Use rotation if it gives better fit
-            if landscape_scale > portrait_scale:
-                img = img.rotate(90, expand=True)
-                orig_width, orig_height = img.size
-                logger.debug("Rotated landscape image to portrait")
+        if maintain_aspect:
+            # Calculate scaling factor to fit within target
+            width_ratio = target_width / original_width
+            height_ratio = target_height / original_height
+            scale = min(width_ratio, height_ratio)
 
-        # Calculate scaling to fit within target dimensions
-        scale = min(self.target_width / orig_width, self.target_height / orig_height)
+            new_width = int(original_width * scale)
+            new_height = int(original_height * scale)
+        else:
+            new_width = target_width
+            new_height = target_height
 
-        # Don't upscale small images
-        if scale > 1.0:
-            scale = 1.0
-
-        new_width = int(orig_width * scale)
-        new_height = int(orig_height * scale)
-
-        logger.debug(f"Scaled size: {new_width}×{new_height} (scale={scale:.2f})")
-
-        # Resize with high-quality resampling
+        # Use high-quality resampling
         img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
 
-        # Add letterboxing if needed
-        if new_width < self.target_width or new_height < self.target_height:
-            # Create white background
-            background = Image.new("RGB", (self.target_width, self.target_height), "white")
-
-            # Center the image
-            x_offset = (self.target_width - new_width) // 2
-            y_offset = (self.target_height - new_height) // 2
-
-            background.paste(img, (x_offset, y_offset))
-            logger.debug(f"Added letterboxing: offsets=({x_offset}, {y_offset})")
-
-            return background
-
+        logger.debug(f"Resized: {original_width}x{original_height} -> {new_width}x{new_height}")
         return img
 
-    def _optimize_for_eink(self, img: Image.Image) -> Image.Image:
+    def _apply_dithering(self, img: Image.Image) -> Image.Image:
         """
-        Apply e-ink display optimizations.
-
-        - Convert to grayscale
-        - Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
-        - Optional dithering (currently disabled)
+        Apply Floyd-Steinberg dithering for better e-ink rendering.
 
         Args:
             img: PIL Image (RGB)
 
         Returns:
-            Optimized PIL Image
+            Dithered image
         """
-        logger.debug("Applying e-ink optimizations")
+        # Convert to grayscale first
+        gray = img.convert("L")
 
-        # Convert PIL to numpy array for OpenCV
-        img_array = np.array(img)
+        # Apply Floyd-Steinberg dithering to 16 levels (4-bit grayscale)
+        # This matches reMarkable's display capabilities better
+        dithered = gray.convert("P", palette=Image.Palette.ADAPTIVE, colors=16)
+        dithered = dithered.convert("L")
 
-        # Convert to grayscale
-        if len(img_array.shape) == 3:
-            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = img_array
+        # Convert back to RGB
+        return dithered.convert("RGB")
 
-        # Apply CLAHE for contrast enhancement
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
-
-        logger.debug("Applied CLAHE contrast enhancement")
-
-        # Convert back to RGB for consistency (JPEG needs RGB)
-        enhanced_rgb = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2RGB)
-
-        # Convert back to PIL
-        return Image.fromarray(enhanced_rgb)
-
-    def _create_exif(self, metadata: ImageMetadata) -> bytes:
+    def _save_with_size_limit(
+        self,
+        img: Image.Image,
+        output_path: Path,
+        initial_quality: int,
+        max_size_kb: int,
+    ) -> Path:
         """
-        Create EXIF metadata bytes.
+        Save image with progressive quality reduction to meet size limit.
 
         Args:
-            metadata: ImageMetadata to embed
+            img: PIL Image
+            output_path: Output path
+            initial_quality: Starting JPEG quality
+            max_size_kb: Maximum file size in KB
 
         Returns:
-            EXIF bytes for piexif
+            Path to saved file
         """
-        exif_dict = {"0th": {}, "Exif": {}, "1st": {}}
+        max_bytes = max_size_kb * 1024
+        quality = initial_quality
 
-        # ImageDescription (caption)
-        if metadata.caption:
-            exif_dict["0th"][piexif.ImageIFD.ImageDescription] = metadata.caption.encode("utf-8")[
-                :255
-            ]  # Max 255 bytes
+        while quality >= 20:
+            # Save to buffer first to check size
+            buffer = BytesIO()
+            img.save(buffer, "JPEG", quality=quality, optimize=True)
+            size = buffer.tell()
 
-        # Software tag for source tracking
-        if metadata.source_file:
-            exif_dict["0th"][piexif.ImageIFD.Software] = f"arxiv2rm:{metadata.source_file}".encode(
-                "utf-8"
+            if size <= max_bytes:
+                # Size is acceptable, save to file
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(output_path, "wb") as f:
+                    f.write(buffer.getvalue())
+                logger.debug(f"Saved at quality {quality}: {size / 1024:.1f}KB")
+                return output_path
+
+            # Reduce quality and try again
+            quality -= 10
+            logger.debug(
+                f"Size {size / 1024:.1f}KB > {max_size_kb}KB, reducing quality to {quality}"
             )
 
-        # UserComment for figure number
-        if metadata.figure_number:
-            comment = f"Figure {metadata.figure_number}"
-            if metadata.source_page:
-                comment += f" (page {metadata.source_page})"
-            exif_dict["Exif"][piexif.ExifIFD.UserComment] = comment.encode("utf-8")
+        # If we still can't meet the target, save at minimum quality
+        logger.warning(
+            f"Could not meet size target of {max_size_kb}KB, " f"saving at minimum quality (20)"
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(output_path, "JPEG", quality=20, optimize=True)
+        return output_path
 
-        # DateTime
-        if metadata.processed_date:
-            exif_dict["0th"][piexif.ImageIFD.DateTime] = metadata.processed_date.encode("ascii")
-
-        try:
-            return piexif.dump(exif_dict)
-        except Exception as e:
-            logger.warning(f"Failed to create EXIF: {e}")
-            return b""
-
-    def batch_optimize(
+    def optimize_batch(
         self,
-        input_dir: Path,
-        output_dir: Optional[Path] = None,
-        recursive: bool = True,
+        input_paths: list[Path],
+        output_dir: Path,
+        settings: Optional[OptimizationSettings] = None,
     ) -> list[Path]:
         """
-        Optimize all images in a directory.
+        Optimize multiple images.
 
         Args:
-            input_dir: Directory containing images
-            output_dir: Output directory (default: input_dir/optimized)
-            recursive: Process subdirectories (default: True)
+            input_paths: List of input image paths
+            output_dir: Directory for optimized images
+            settings: Override settings for this batch
 
         Returns:
             List of paths to optimized images
         """
-        if not input_dir.exists():
-            raise ValueError(f"Input directory not found: {input_dir}")
-
-        if output_dir is None:
-            output_dir = input_dir / "optimized"
-
+        output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Supported image formats
-        patterns = ["*.png", "*.jpg", "*.jpeg", "*.pdf", "*.eps"]
+        results = []
+        for input_path in input_paths:
+            input_path = Path(input_path)
+            output_path = output_dir / f"{input_path.stem}.jpg"
 
-        input_images = []
-        for pattern in patterns:
-            if recursive:
-                input_images.extend(input_dir.rglob(pattern))
-            else:
-                input_images.extend(input_dir.glob(pattern))
-
-        logger.info(f"Found {len(input_images)} images to optimize")
-
-        optimized = []
-        for img_path in input_images:
             try:
-                # Preserve relative directory structure
-                rel_path = img_path.relative_to(input_dir)
-                out_path = output_dir / rel_path.with_suffix(".jpg")
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-
-                result = self.optimize(img_path, out_path)
-                optimized.append(result)
+                result = self.optimize(input_path, output_path, settings)
+                results.append(result)
             except Exception as e:
-                logger.warning(f"Skipped {img_path.name}: {e}")
+                logger.error(f"Failed to optimize {input_path}: {e}")
 
-        logger.info(f"Successfully optimized {len(optimized)}/{len(input_images)} images")
-        return optimized
+        logger.info(f"Optimized {len(results)}/{len(input_paths)} images")
+        return results
 
 
-def optimize_image(
+def optimize_for_remarkable(
     input_path: Path,
     output_path: Optional[Path] = None,
-    target_size: Tuple[int, int] = (1404, 1872),
+    device: RemarkableDevice = RemarkableDevice.REMARKABLE_1,
     quality: int = 85,
-    eink_optimize: bool = True,
 ) -> Path:
     """
-    Convenience function to optimize a single image.
+    Convenience function to optimize a single image for reMarkable.
 
     Args:
         input_path: Path to input image
-        output_path: Path to save output (default: input_path_opt.jpg)
-        target_size: Target dimensions (width, height)
-        quality: JPEG quality 1-100
-        eink_optimize: Apply e-ink optimizations
+        output_path: Path for output (optional)
+        device: Target reMarkable device
+        quality: JPEG quality (1-100)
 
     Returns:
         Path to optimized image
     """
-    optimizer = ImageOptimizer(
-        target_width=target_size[0],
-        target_height=target_size[1],
-        quality=quality,
-        optimize_eink=eink_optimize,
-    )
+    settings = OptimizationSettings(device=device, quality=quality)
+    optimizer = ImageOptimizer(settings)
     return optimizer.optimize(input_path, output_path)
+
+
+# Example usage
+if __name__ == "__main__":
+    import sys
+
+    logging.basicConfig(level=logging.DEBUG)
+
+    if len(sys.argv) > 1:
+        input_path = Path(sys.argv[1])
+        output_path = Path(sys.argv[2]) if len(sys.argv) > 2 else None
+
+        if input_path.exists():
+            result = optimize_for_remarkable(input_path, output_path)
+            print(f"Optimized image saved to: {result}")
+        else:
+            print(f"File not found: {input_path}")
+    else:
+        print("Usage: python image_optimizer.py <input_image> [output_image]")
