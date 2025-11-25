@@ -941,10 +941,10 @@ class LaTeXProcessor:
 
     def _extract_math_from_sections(self, doc: LaTeXDocument):
         """
-        Extract math formulas from section content.
+        Extract math formulas from section content and tables.
 
         This method finds inline math ($...$) and display math
-        (equation, align, etc.) in section content.
+        (equation, align, etc.) in section content and table cells.
 
         Args:
             doc: LaTeXDocument to extract math from
@@ -957,6 +957,11 @@ class LaTeXProcessor:
         for section in doc.sections:
             if section.content:
                 self._extract_math_from_text(section.content, doc)
+
+        # Process all tables
+        for table in doc.tables:
+            if table.content:
+                self._extract_math_from_text(table.content, doc)
 
     def _extract_math_from_text(self, text: str, doc: LaTeXDocument):
         """
