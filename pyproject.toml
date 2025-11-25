@@ -92,6 +92,9 @@ Documentation = "https://github.com/thomnico/arxiv-to-remarkable#readme"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+arxiv2rm = ["fonts/*.otf", "fonts/LICENSE.txt"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
