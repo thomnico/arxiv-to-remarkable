@@ -332,6 +332,10 @@ class EPUBBuilder:
                 # Convert LaTeX tabular to HTML table
                 table_html = LaTeXProcessor.tabular_to_html(table.content)
 
+                # Replace math in table cells if math rendering is enabled
+                if self.render_math:
+                    table_html = self._replace_math_in_content(table_html)
+
                 caption_text = f": {self._escape_html(table.caption)}" if table.caption else ""
                 html += f"""
             <div class="table-container" id="tab{table.number}">
