@@ -670,22 +670,64 @@ class LaTeXProcessor:
         content = re.sub(r"\\begin\{tabular\}\{[^}]+\}", "", tabular_content)
         content = re.sub(r"\\end\{tabular\}", "", content)
 
-        # Remove table rules
-        content = re.sub(r"\\(toprule|midrule|bottomrule|hline|cline\{[^}]+\})", "", content)
+        # Remove table rules (including \cmidrule which sometimes appears as content)
+        content = re.sub(
+            r"\\(toprule|midrule|bottomrule|hline|cmidrule\{[^}]+\}|cline\{[^}]+\})", "", content
+        )
         content = re.sub(r"\\rule\{[^}]+\}\{[^}]+\}", "", content)
+
+        # Handle multicolumn: \multicolumn{n}{align}{text} -> text
+        content = re.sub(r"\\multicolumn\{[^}]+\}\{[^}]+\}\{([^}]*)\}", r"\1", content)
+
+        # Handle multirow: \multirow{n}{width}{text} -> text
+        content = re.sub(r"\\multirow\{[^}]+\}\{[^}]*\}\{([^}]*)\}", r"\1", content)
+
+        # Remove citations
+        content = re.sub(r"\\cite[a-z]*\{[^}]+\}", "", content)
+
+        # Remove other LaTeX commands that shouldn't be in table cells
+        content = re.sub(r"\\vspace\{[^}]+\}", "", content)
+        content = re.sub(r"\\hspace\{[^}]+\}", "", content)
+        content = re.sub(r"\\specialrule\{[^}]+\}\{[^}]+\}\{[^}]+\}", "", content)
+
+        # Handle text formatting commands (preserve the text content)
+        content = re.sub(r"\\textbf\{([^}]+)\}", r"<strong>\1</strong>", content)
+        content = re.sub(r"\\textit\{([^}]+)\}", r"<em>\1</em>", content)
+        content = re.sub(r"\\emph\{([^}]+)\}", r"<em>\1</em>", content)
+        content = re.sub(r"\\boldmath", "", content)
+
+        # Clean up extra whitespace and empty braces
+        content = re.sub(r"\{\s*\}", "", content)
+        content = re.sub(r"\s+", " ", content)
 
         # Split into rows (split on \\)
         rows = [r.strip() for r in re.split(r"\\\\", content) if r.strip()]
 
+        # Filter out rows that are just rule commands
+        rows = [
+            r for r in rows if not re.match(r"^\s*\\(toprule|midrule|bottomrule|hline|cmidrule)", r)
+        ]
+
         html_rows = []
+
+        # Heuristic: First row(s) with fewer cells are often headers
+        # Or rows before the first \hline
         for row_idx, row in enumerate(rows):
+            # Skip if row is empty after cleaning
+            if not row.strip():
+                continue
+
             # Split into cells (split on &)
-            cells = [c.strip() for c in row.split("&")]
+            cells = [c.strip() for c in row.split("&") if c.strip()]
 
-            # First row is typically header
-            tag = "th" if row_idx == 0 else "td"
+            # Skip rows with no cells
+            if not cells:
+                continue
 
-            cell_html = "".join(f"<{tag}>{cell}</{tag}>" for cell in cells if cell)
+            # First non-empty row is typically header
+            tag = "th" if row_idx < 2 else "td"  # First 2 rows are often headers
+
+            cell_html = "".join(f"<{tag}>{cell}</{tag}>" for cell in cells)
             html_rows.append(f"<tr>{cell_html}</tr>")
 
         return f'<table>{"".join(html_rows)}</table>'
