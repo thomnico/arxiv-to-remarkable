@@ -98,7 +98,7 @@ class ColumnDetector:
     def __init__(
         self,
         min_column_width_ratio: float = 0.25,
-        gutter_threshold_ratio: float = 0.05,
+        gutter_threshold_ratio: float = 0.025,  # Reduced from 0.05 to detect narrower gutters
         header_footer_margin_ratio: float = 0.1,
     ):
         """
@@ -144,9 +144,13 @@ class ColumnDetector:
         header_margin = page_height * self.header_footer_margin_ratio
         footer_margin = page_height * (1 - self.header_footer_margin_ratio)
 
+        # Header: blocks entirely within header region (y1 < header_margin)
         header_blocks = [b for b in blocks if b.y1 < header_margin]
+        # Footer: blocks entirely within footer region (y0 > footer_margin)
         footer_blocks = [b for b in blocks if b.y0 > footer_margin]
-        body_blocks = [b for b in blocks if header_margin <= b.center_y <= footer_margin]
+        # Body: blocks that overlap with body region (not entirely in header/footer)
+        # Use y0 < footer_margin and y1 > header_margin to catch boundary-straddling blocks
+        body_blocks = [b for b in blocks if b.y0 < footer_margin and b.y1 > header_margin]
 
         # Detect columns from body blocks only
         columns, confidence = self._detect_columns(body_blocks, page_width)
@@ -171,7 +175,9 @@ class ColumnDetector:
     def _extract_text_blocks(self, page: fitz.Page) -> List[TextBlock]:
         """Extract text blocks with position and font information."""
         blocks = []
-        dict_data = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+        # Note: Don't use TEXT_PRESERVE_WHITESPACE flag as it breaks symbol font extraction
+        # (e.g., wasy8 checkmarks become replacement characters with that flag)
+        dict_data = page.get_text("dict")
 
         for block in dict_data.get("blocks", []):
             if block.get("type") != 0:  # Skip non-text blocks (images)

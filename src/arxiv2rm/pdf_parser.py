@@ -41,6 +41,156 @@ class PDFParser:
         self.column_extractor = ColumnAwareExtractor() if detect_columns else None
         self.column_detector = ColumnDetector() if detect_columns else None
 
+    def extract_metadata(self, pdf_path: Path) -> Dict:
+        """
+        Extract metadata from PDF including title, authors, and ArXiv ID.
+
+        Tries multiple strategies:
+        1. PDF metadata (title, author fields)
+        2. First page text analysis (largest font = title)
+        3. ArXiv ID from metadata or filename
+
+        Args:
+            pdf_path: Path to PDF file
+
+        Returns:
+            Dict with title, authors, arxiv_id (if found)
+        """
+        import re
+
+        pdf_path = Path(pdf_path)
+        doc = fitz.open(pdf_path)
+
+        metadata = {
+            "title": None,
+            "authors": [],
+            "arxiv_id": None,
+        }
+
+        # Strategy 1: Check PDF metadata
+        pdf_meta = doc.metadata
+        if pdf_meta:
+            if pdf_meta.get("title") and len(pdf_meta["title"].strip()) > 3:
+                metadata["title"] = pdf_meta["title"].strip()
+            if pdf_meta.get("author"):
+                # Authors can be comma or semicolon separated
+                author_str = pdf_meta["author"]
+                if ";" in author_str:
+                    metadata["authors"] = [a.strip() for a in author_str.split(";")]
+                elif "," in author_str:
+                    metadata["authors"] = [a.strip() for a in author_str.split(",")]
+                else:
+                    metadata["authors"] = [author_str.strip()]
+
+        # Strategy 2: Extract title from first page (largest font text)
+        if not metadata["title"] or metadata["title"].lower() in ["untitled", "unknown"]:
+            first_page = doc[0]
+            blocks = first_page.get_text("dict").get("blocks", [])
+
+            # Find text with largest font size in top portion of page
+            candidates = []
+            page_height = first_page.rect.height
+            page_width = first_page.rect.width
+
+            # Patterns to skip (arXiv watermarks, headers, etc.)
+            skip_patterns = [
+                r"^arXiv:",  # arXiv identifier
+                r"^\d{4}\.\d{4,5}",  # arXiv ID at start
+                r"^\[.*\]$",  # Category tags like [cs.CR]
+                r"^Preprint",  # Preprint headers
+                r"^Draft",  # Draft markers
+                r"^Page\s+\d+",  # Page numbers
+                r"^\d+\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)",  # Dates
+            ]
+            skip_regex = re.compile("|".join(skip_patterns), re.IGNORECASE)
+
+            for block in blocks:
+                if block.get("type") != 0:  # Only text blocks
+                    continue
+
+                for line in block.get("lines", []):
+                    bbox = line.get("bbox", [0, 0, 0, 0])
+                    # Only consider text in top 30% of page
+                    if bbox[1] > page_height * 0.3:
+                        continue
+
+                    # Skip text in margins (left 10% or right 10%) - often watermarks
+                    if bbox[0] < page_width * 0.1 or bbox[2] > page_width * 0.9:
+                        # Allow if text is centered (title often spans wide)
+                        text_center = (bbox[0] + bbox[2]) / 2
+                        if abs(text_center - page_width / 2) > page_width * 0.3:
+                            continue
+
+                    for span in line.get("spans", []):
+                        text = span.get("text", "").strip()
+                        font_size = span.get("size", 0)
+
+                        # Skip very short text, small fonts, or skip patterns
+                        if len(text) <= 5 or font_size <= 10:
+                            continue
+                        if skip_regex.search(text):
+                            continue
+
+                        candidates.append(
+                            {
+                                "text": text,
+                                "size": font_size,
+                                "y": bbox[1],
+                            }
+                        )
+
+            # Sort by font size (largest first), then by position (top first)
+            candidates.sort(key=lambda x: (-x["size"], x["y"]))
+
+            # Take the largest font text as title (combine if multi-line title)
+            if candidates:
+                title_parts = []
+                title_size = candidates[0]["size"]
+                for c in candidates:
+                    # Include text with same font size (multi-line title)
+                    if c["size"] >= title_size * 0.95:  # Allow 5% variance
+                        # Skip if this part looks like metadata
+                        if not skip_regex.search(c["text"]):
+                            title_parts.append(c["text"])
+                    else:
+                        break
+
+                if title_parts:
+                    metadata["title"] = " ".join(title_parts)
+
+        # Strategy 3: Detect ArXiv ID
+        # Check filename first (e.g., 2301.12345.pdf, 2301.12345v2.pdf)
+        arxiv_pattern = re.compile(r"(\d{4}\.\d{4,5}(?:v\d+)?)")
+        filename_match = arxiv_pattern.search(pdf_path.stem)
+        if filename_match:
+            metadata["arxiv_id"] = filename_match.group(1)
+        else:
+            # Check PDF metadata for arxiv reference
+            if pdf_meta:
+                for key in ["subject", "keywords", "creator", "producer"]:
+                    value = pdf_meta.get(key, "")
+                    if value:
+                        arxiv_match = arxiv_pattern.search(value)
+                        if arxiv_match:
+                            metadata["arxiv_id"] = arxiv_match.group(1)
+                            break
+
+            # Check first page text for ArXiv ID
+            if not metadata["arxiv_id"]:
+                first_page_text = doc[0].get_text()
+                # Look for "arXiv:2301.12345" pattern
+                arxiv_full_pattern = re.compile(r"arXiv[:\s]*(\d{4}\.\d{4,5}(?:v\d+)?)", re.I)
+                arxiv_match = arxiv_full_pattern.search(first_page_text)
+                if arxiv_match:
+                    metadata["arxiv_id"] = arxiv_match.group(1)
+
+        doc.close()
+
+        logger.info(
+            f"Extracted metadata: title='{metadata['title']}', arxiv_id={metadata['arxiv_id']}"
+        )
+        return metadata
+
     def analyze_pdf(self, pdf_path: Path) -> Dict:
         """
         Analyze PDF structure and content type.
@@ -124,14 +274,273 @@ class PDFParser:
         logger.info(f"PDF Analysis: {analysis}")
         return analysis
 
-    def extract_text_pymupdf(self, pdf_path: Path) -> List[Dict]:
+    def analyze_special_characters(self, pdf_path: Path) -> Dict:
+        """
+        Analyze PDF for special characters that may not render in standard fonts.
+
+        Detects:
+        - PUA characters (Private Use Area: U+E000-U+F8FF) from LaTeX fonts
+        - Mathematical symbols from CMEX, CMSY, CMMIB fonts
+        - Replacement characters (U+FFFD) indicating extraction issues
+
+        Returns:
+            Dict with:
+            - pua_chars: Dict mapping code point to (count, fonts_using)
+            - replacement_count: Number of replacement characters found
+            - problematic_fonts: Set of fonts with non-standard characters
+            - unicode_mapping: Suggested mappings for PUA chars to standard Unicode
+        """
+        logger.info(f"Analyzing special characters in: {pdf_path}")
+
+        doc = fitz.open(pdf_path)
+
+        pua_chars: Dict[int, Dict] = {}  # code_point -> {count, fonts}
+        replacement_count = 0
+        problematic_fonts = set()
+
+        # PUA to Unicode mappings for common LaTeX/CM fonts
+        # CMEX10 bracket pieces
+        pua_unicode_map = {
+            0xF8EE: "⎡",  # Left square bracket upper corner
+            0xF8EF: "⎣",  # Left square bracket lower corner
+            0xF8F0: "⎡",  # Alternative upper left
+            0xF8F1: "⎢",  # Left bracket extension
+            0xF8F9: "⎤",  # Right square bracket upper corner
+            0xF8FA: "⎦",  # Right square bracket lower corner
+            0xF8FB: "⎤",  # Alternative upper right
+            0xF8FC: "⎥",  # Right bracket extension
+            # CMSY10 symbols
+            0xF8E6: "∑",  # Summation
+            0xF8E7: "∏",  # Product
+            0xF8FF: "→",  # Arrow (Apple PUA)
+            # More bracket variants
+            0xF8F3: "⎧",  # Left curly bracket upper
+            0xF8F4: "⎨",  # Left curly bracket middle
+            0xF8F5: "⎩",  # Left curly bracket lower
+            0xF8FE: "⎫",  # Right curly bracket upper
+            0xF8FD: "⎬",  # Right curly bracket middle
+            0xF8F6: "⎭",  # Right curly bracket lower
+        }
+
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            blocks = page.get_text("dict")["blocks"]
+
+            for block in blocks:
+                if block.get("type") != 0:
+                    continue
+
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        text = span.get("text", "")
+                        font = span.get("font", "unknown")
+
+                        for char in text:
+                            code = ord(char)
+
+                            # Check for replacement character
+                            if code == 0xFFFD:
+                                replacement_count += 1
+                                problematic_fonts.add(font)
+                                continue
+
+                            # Check for PUA range (U+E000-U+F8FF)
+                            if 0xE000 <= code <= 0xF8FF:
+                                if code not in pua_chars:
+                                    pua_chars[code] = {"count": 0, "fonts": set()}
+                                pua_chars[code]["count"] += 1
+                                pua_chars[code]["fonts"].add(font)
+                                problematic_fonts.add(font)
+
+        doc.close()
+
+        # Convert sets to lists for JSON serialization
+        for code in pua_chars:
+            pua_chars[code]["fonts"] = list(pua_chars[code]["fonts"])
+
+        analysis = {
+            "pua_chars": {f"U+{code:04X}": info for code, info in pua_chars.items()},
+            "pua_count": sum(info["count"] for info in pua_chars.values()),
+            "replacement_count": replacement_count,
+            "problematic_fonts": list(problematic_fonts),
+            "unicode_mapping": {
+                f"U+{code:04X}": char for code, char in pua_unicode_map.items() if code in pua_chars
+            },
+            "unmapped_pua": [f"U+{code:04X}" for code in pua_chars if code not in pua_unicode_map],
+        }
+
+        if pua_chars or replacement_count:
+            logger.warning(
+                f"Special characters found: {len(pua_chars)} PUA chars, "
+                f"{replacement_count} replacement chars from fonts: {problematic_fonts}"
+            )
+        else:
+            logger.info("No problematic special characters found")
+
+        return analysis
+
+    def extract_matrix_formulas(self, pdf_path: Path, output_dir: Path) -> List[Dict]:
+        """
+        Extract matrix/bracket notation as images from PDF.
+
+        Detects multi-line equations with large brackets (from CMEX10 font)
+        that cannot be properly rendered as text in EPUB.
+
+        Args:
+            pdf_path: Path to PDF file
+            output_dir: Directory to save extracted formula images
+
+        Returns:
+            List of dicts with:
+            - page: page number (0-indexed)
+            - bbox: bounding box coordinates
+            - img_path: path to extracted image
+            - img_name: filename of extracted image
+        """
+        logger.info(f"Extracting matrix formulas from: {pdf_path}")
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        doc = fitz.open(pdf_path)
+
+        # First pass: detect all blocks with bracket pieces
+        bracket_blocks = []
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            blocks = page.get_text("dict")["blocks"]
+
+            for block in blocks:
+                if block.get("type") != 0:
+                    continue
+
+                bbox = block.get("bbox")
+                has_bracket_pieces = False
+
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        text = span.get("text", "")
+                        # Check for CMEX10 bracket pieces (PUA range F8EE-F8FF)
+                        for c in text:
+                            code = ord(c)
+                            if 0xF8EE <= code <= 0xF8FF:
+                                has_bracket_pieces = True
+                                break
+                        if has_bracket_pieces:
+                            break
+                    if has_bracket_pieces:
+                        break
+
+                if has_bracket_pieces:
+                    bracket_blocks.append(
+                        {
+                            "page": page_num,
+                            "bbox": bbox,
+                        }
+                    )
+
+        # Second pass: merge adjacent bracket blocks into formula regions
+        from collections import defaultdict
+
+        by_page = defaultdict(list)
+        for block in bracket_blocks:
+            by_page[block["page"]].append(block)
+
+        merged_regions = []
+        for page_num, blocks in by_page.items():
+            # Sort by vertical position
+            blocks.sort(key=lambda b: b["bbox"][1])
+
+            current_group = None
+            for block in blocks:
+                bbox = block["bbox"]
+                if current_group is None:
+                    current_group = {
+                        "page": page_num,
+                        "bbox": list(bbox),
+                    }
+                else:
+                    # Merge if within 30 pixels vertically
+                    if bbox[1] - current_group["bbox"][3] < 30:
+                        current_group["bbox"][0] = min(current_group["bbox"][0], bbox[0])
+                        current_group["bbox"][2] = max(current_group["bbox"][2], bbox[2])
+                        current_group["bbox"][3] = bbox[3]
+                    else:
+                        merged_regions.append(current_group)
+                        current_group = {
+                            "page": page_num,
+                            "bbox": list(bbox),
+                        }
+
+            if current_group:
+                merged_regions.append(current_group)
+
+        # Third pass: extract images
+        zoom = 2.5  # Good quality for formulas
+        mat = fitz.Matrix(zoom, zoom)
+        results = []
+
+        for i, region in enumerate(merged_regions):
+            page = doc[region["page"]]
+            bbox = region["bbox"]
+
+            # Add padding around the formula
+            clip = fitz.Rect(bbox[0] - 25, bbox[1] - 15, bbox[2] + 25, bbox[3] + 15)
+            clip.intersect(page.rect)
+
+            pix = page.get_pixmap(matrix=mat, clip=clip)
+
+            img_name = f"formula_{i + 1:03d}_p{region['page'] + 1}.png"
+            img_path = output_dir / img_name
+            pix.save(str(img_path))
+
+            results.append(
+                {
+                    "page": region["page"],
+                    "bbox": tuple(region["bbox"]),
+                    "img_path": img_path,
+                    "img_name": img_name,
+                    "width": pix.width,
+                    "height": pix.height,
+                }
+            )
+
+            logger.debug(f"Extracted formula: {img_name} ({pix.width}x{pix.height})")
+
+        doc.close()
+
+        logger.info(f"Extracted {len(results)} matrix formula images")
+        return results
+
+    def extract_text_pymupdf(
+        self,
+        pdf_path: Path,
+        exclude_regions: Optional[List[Dict]] = None,
+    ) -> List[Dict]:
         """
         Extract text using PyMuPDF (for text-based PDFs).
+
+        Args:
+            pdf_path: Path to PDF file
+            exclude_regions: Optional list of regions to exclude from text extraction.
+                Each region should have 'page' (0-indexed) and 'bbox' (x0, y0, x1, y1).
+                Text blocks overlapping these regions will be replaced with placeholders.
 
         Returns:
             List of dicts with page_num, text, layout info
         """
         logger.info("Extracting text with PyMuPDF...")
+
+        # Build lookup of excluded regions by page
+        excluded_by_page: Dict[int, List[tuple]] = {}
+        if exclude_regions:
+            for region in exclude_regions:
+                page_num = region.get("page", 0)
+                bbox = region.get("bbox")
+                if bbox:
+                    if page_num not in excluded_by_page:
+                        excluded_by_page[page_num] = []
+                    excluded_by_page[page_num].append(tuple(bbox))
 
         doc = fitz.open(pdf_path)
         pages = []
@@ -139,15 +548,64 @@ class PDFParser:
         for page_num in range(len(doc)):
             page = doc[page_num]
 
-            # Extract text with layout preservation
-            text = page.get_text("text")  # Simple text
-            blocks = page.get_text("dict")  # Structured layout
+            # Get excluded regions for this page
+            page_exclusions = excluded_by_page.get(page_num, [])
+
+            if page_exclusions:
+                # Extract text block by block, skipping excluded regions
+                text_parts = []
+                blocks = page.get_text("dict")["blocks"]
+
+                for block in blocks:
+                    if block.get("type") != 0:  # Skip non-text blocks
+                        continue
+
+                    block_bbox = block.get("bbox", (0, 0, 0, 0))
+
+                    # Check if this block overlaps with any excluded region
+                    is_excluded = False
+                    excluded_region_idx = None
+                    for idx, excl_bbox in enumerate(page_exclusions):
+                        if self._bboxes_overlap(block_bbox, excl_bbox):
+                            is_excluded = True
+                            excluded_region_idx = idx
+                            break
+
+                    if is_excluded:
+                        # Insert placeholder for the first excluded block in this region
+                        # (subsequent overlapping blocks are just skipped)
+                        if excluded_region_idx is not None:
+                            # Find the corresponding formula image
+                            for region in exclude_regions or []:
+                                if (
+                                    region.get("page") == page_num
+                                    and tuple(region.get("bbox", ()))
+                                    == page_exclusions[excluded_region_idx]
+                                ):
+                                    img_name = Path(region.get("img_path", "")).name
+                                    if img_name:
+                                        placeholder = f"[FORMULA_IMAGE:{img_name}:page{page_num+1}]"
+                                        if placeholder not in text_parts:
+                                            text_parts.append(placeholder)
+                                    break
+                    else:
+                        # Extract text from this block
+                        block_text = self._extract_block_text(block)
+                        if block_text.strip():
+                            text_parts.append(block_text)
+
+                text = "\n".join(text_parts)
+                blocks_dict = page.get_text("dict")
+            else:
+                # No exclusions - extract normally
+                text = page.get_text("text")
+                blocks_dict = page.get_text("dict")
 
             pages.append(
                 {
                     "page_num": page_num + 1,
                     "text": text,
-                    "blocks": blocks,
+                    "blocks": blocks_dict,
                     "width": page.rect.width,
                     "height": page.rect.height,
                 }
@@ -156,6 +614,53 @@ class PDFParser:
         doc.close()
         logger.info(f"Extracted text from {len(pages)} pages")
         return pages
+
+    def _bboxes_overlap(self, bbox1: tuple, bbox2: tuple, margin: float = 5.0) -> bool:
+        """
+        Check if two bounding boxes overlap (with optional margin).
+
+        Args:
+            bbox1: First bounding box (x0, y0, x1, y1)
+            bbox2: Second bounding box (x0, y0, x1, y1)
+            margin: Extra margin to expand bbox2 for overlap detection
+
+        Returns:
+            True if boxes overlap
+        """
+        x0_1, y0_1, x1_1, y1_1 = bbox1
+        x0_2, y0_2, x1_2, y1_2 = bbox2
+
+        # Expand bbox2 by margin
+        x0_2 -= margin
+        y0_2 -= margin
+        x1_2 += margin
+        y1_2 += margin
+
+        # Check for no overlap conditions
+        if x1_1 < x0_2 or x0_1 > x1_2:
+            return False
+        if y1_1 < y0_2 or y0_1 > y1_2:
+            return False
+
+        return True
+
+    def _extract_block_text(self, block: Dict) -> str:
+        """
+        Extract text from a single text block.
+
+        Args:
+            block: PyMuPDF text block dict
+
+        Returns:
+            Text content of the block
+        """
+        text_parts = []
+        for line in block.get("lines", []):
+            line_text = ""
+            for span in line.get("spans", []):
+                line_text += span.get("text", "")
+            text_parts.append(line_text)
+        return "\n".join(text_parts)
 
     def extract_text_pdfplumber(self, pdf_path: Path) -> List[Dict]:
         """
@@ -593,7 +1098,12 @@ class PDFParser:
         doc.close()
         return img
 
-    def parse(self, pdf_path: Path, output_dir: Optional[Path] = None) -> Dict:
+    def parse(
+        self,
+        pdf_path: Path,
+        output_dir: Optional[Path] = None,
+        exclude_regions: Optional[List[Dict]] = None,
+    ) -> Dict:
         """
         Parse PDF intelligently (text extraction + OCR when needed).
 
@@ -605,6 +1115,9 @@ class PDFParser:
         Args:
             pdf_path: Path to PDF file
             output_dir: Optional directory for extracted images
+            exclude_regions: Optional list of regions to exclude from text extraction
+                (e.g., formula regions that will be replaced with images).
+                Each region should have 'page' (0-indexed), 'bbox', and 'img_path'.
 
         Returns:
             Dict with:
@@ -644,6 +1157,10 @@ class PDFParser:
                 logger.info("Detected 2-column layout - using column-aware extraction")
                 try:
                     pages = self.extract_text_column_aware(pdf_path)
+                    # If we have exclude_regions, we need to post-process
+                    # to remove formula text (column-aware doesn't support exclusions yet)
+                    if exclude_regions:
+                        pages = self._apply_exclusions_to_pages(pdf_path, pages, exclude_regions)
                 except Exception as e:
                     logger.warning(
                         f"Column-aware extraction failed: {e}, " "falling back to pdfplumber"
@@ -651,11 +1168,16 @@ class PDFParser:
                     pages = self.extract_text_pdfplumber(pdf_path)
             else:
                 # Use standard extraction for single-column
-                try:
-                    pages = self.extract_text_pdfplumber(pdf_path)
-                except Exception as e:
-                    logger.warning(f"pdfplumber failed: {e}, falling back to PyMuPDF")
-                    pages = self.extract_text_pymupdf(pdf_path)
+                # If we have exclusions, use PyMuPDF which supports them
+                if exclude_regions:
+                    logger.info("Using PyMuPDF with formula exclusions")
+                    pages = self.extract_text_pymupdf(pdf_path, exclude_regions=exclude_regions)
+                else:
+                    try:
+                        pages = self.extract_text_pdfplumber(pdf_path)
+                    except Exception as e:
+                        logger.warning(f"pdfplumber failed: {e}, falling back to PyMuPDF")
+                        pages = self.extract_text_pymupdf(pdf_path)
 
         return {
             "analysis": analysis,
@@ -663,6 +1185,81 @@ class PDFParser:
             "images": images,
             "output_dir": output_dir,
         }
+
+    def _apply_exclusions_to_pages(
+        self,
+        pdf_path: Path,
+        pages: List[Dict],
+        exclude_regions: List[Dict],
+    ) -> List[Dict]:
+        """
+        Post-process pages to remove text from excluded regions.
+
+        This is used when the primary extraction method doesn't support exclusions.
+
+        Args:
+            pdf_path: Path to PDF file
+            pages: List of extracted page dicts
+            exclude_regions: List of regions to exclude
+
+        Returns:
+            Pages with excluded text replaced by placeholders
+        """
+        # Build lookup by page
+        exclusions_by_page: Dict[int, List[Dict]] = {}
+        for region in exclude_regions:
+            page_num = region.get("page", 0)
+            if page_num not in exclusions_by_page:
+                exclusions_by_page[page_num] = []
+            exclusions_by_page[page_num].append(region)
+
+        # For pages with exclusions, re-extract using PyMuPDF with exclusions
+        doc = fitz.open(pdf_path)
+
+        for i, page_data in enumerate(pages):
+            page_num = page_data.get("page_num", i + 1) - 1  # Convert to 0-indexed
+
+            if page_num in exclusions_by_page:
+                # Re-extract this page with exclusions
+                page = doc[page_num]
+                page_exclusions = exclusions_by_page[page_num]
+
+                text_parts = []
+                blocks = page.get_text("dict")["blocks"]
+                inserted_placeholders = set()
+
+                for block in blocks:
+                    if block.get("type") != 0:
+                        continue
+
+                    block_bbox = block.get("bbox", (0, 0, 0, 0))
+
+                    # Check if this block overlaps with any excluded region
+                    matched_region = None
+                    for region in page_exclusions:
+                        bbox = region.get("bbox")
+                        if bbox and self._bboxes_overlap(block_bbox, tuple(bbox)):
+                            matched_region = region
+                            break
+
+                    if matched_region:
+                        # Insert placeholder (only once per region)
+                        img_name = Path(matched_region.get("img_path", "")).name
+                        if img_name:
+                            placeholder = f"[FORMULA_IMAGE:{img_name}:page{page_num+1}]"
+                            if placeholder not in inserted_placeholders:
+                                text_parts.append(placeholder)
+                                inserted_placeholders.add(placeholder)
+                    else:
+                        block_text = self._extract_block_text(block)
+                        if block_text.strip():
+                            text_parts.append(block_text)
+
+                # Update the page text
+                pages[i]["text"] = "\n".join(text_parts)
+
+        doc.close()
+        return pages
 
     def _parse_with_ocr(self, pdf_path: Path, output_dir: Path) -> List[Dict]:
         """

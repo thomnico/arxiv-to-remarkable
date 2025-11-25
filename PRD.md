@@ -1019,7 +1019,7 @@ remarkable:
 ### Open Questions
 1. **Deepseek-OCR API**: Pricing model? Rate limits?
 2. **reMarkable EPUB support**: Full EPUB 3.0 compatibility on reMarkable 1/2?
-3. **Formula preservation**: MathML in EPUB vs images for mathematical notation?
+3. **Formula preservation**: ~~MathML in EPUB vs images for mathematical notation?~~ **DECIDED**: Extract formulas as images from PDF (see [ADR-001](docs/ADR-001-formula-rendering.md))
 4. **Batch size**: How many papers can typical user convert in one session?
 5. **LaTeX parsing**: Which Python library for .tex parsing (TexSoup, PyLaTeX)?
 
@@ -1047,7 +1047,7 @@ remarkable:
 - **Multi-language**: Support for non-English papers (multilingual OCR)
 - **Audio narration**: TTS integration for accessibility (EPUB 3.0 media overlays)
 - **Interactive elements**: Embedded videos/links in EPUB (for supplementary materials)
-- **MathML support**: Native mathematical notation rendering in EPUB
+- **MathML support**: ~~Native mathematical notation rendering in EPUB~~ (Replaced by image extraction approach - see ADR-001)
 
 ---
 

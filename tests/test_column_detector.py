@@ -77,7 +77,7 @@ class TestColumnDetector:
     def test_detector_initialization(self, detector):
         """Test default detector parameters."""
         assert detector.min_column_width_ratio == 0.25
-        assert detector.gutter_threshold_ratio == 0.05
+        assert detector.gutter_threshold_ratio == 0.025
         assert detector.header_footer_margin_ratio == 0.1
 
     def test_custom_detector_parameters(self):

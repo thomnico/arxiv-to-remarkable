@@ -1,6 +1,7 @@
 """Command-line interface for arxiv2rm."""
 
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -14,6 +15,77 @@ from arxiv2rm import __version__
 from arxiv2rm.config import ConfigLoader, get_config
 
 console = Console()
+
+
+def sanitize_filename(title: str, max_length: int = 80) -> str:
+    """
+    Sanitize a title for use as a filename.
+
+    Args:
+        title: The paper title to sanitize
+        max_length: Maximum length for the filename (default 80)
+
+    Returns:
+        A filesystem-safe filename
+    """
+    if not title:
+        return "output"
+
+    # Replace common problematic characters
+    filename = title.strip()
+
+    # Remove or replace special characters
+    # Keep alphanumeric, spaces, hyphens, underscores
+    filename = re.sub(r"[/:*?\"<>|\\]", "", filename)  # Remove illegal chars
+    filename = re.sub(r"['\u2019\u2018]", "", filename)  # Remove quotes
+    filename = re.sub(r"[\u2013\u2014]", "-", filename)  # Replace em/en dashes
+    filename = re.sub(r"\s+", " ", filename)  # Collapse whitespace
+    filename = filename.strip()
+
+    # Replace spaces with underscores for cleaner filenames
+    filename = filename.replace(" ", "_")
+
+    # Remove consecutive underscores
+    filename = re.sub(r"_+", "_", filename)
+
+    # Truncate to max length (leave room for extension and arxiv ID)
+    if len(filename) > max_length:
+        filename = filename[:max_length].rstrip("_")
+
+    # Ensure we have something
+    if not filename:
+        filename = "output"
+
+    return filename
+
+
+def generate_output_filename(
+    pdf_path: Path,
+    title: str | None = None,
+    arxiv_id: str | None = None,
+) -> Path:
+    """
+    Generate an output filename from paper metadata.
+
+    Args:
+        pdf_path: Original PDF path (used as fallback and for directory)
+        title: Paper title (optional)
+        arxiv_id: ArXiv ID (optional, appended if present)
+
+    Returns:
+        Path object with the generated filename
+    """
+    if title:
+        base_name = sanitize_filename(title)
+    else:
+        # Fallback to original filename
+        base_name = pdf_path.stem
+
+    # Append ArXiv ID if present
+    if arxiv_id:
+        base_name = f"{base_name}-{arxiv_id}"
+
+    return pdf_path.parent / f"{base_name}.epub"
 
 
 def setup_logging(level: str = "INFO") -> None:
@@ -135,10 +207,28 @@ def convert(
     if not input_path.suffix.lower() == ".pdf":
         console.print(f"[yellow]Warning:[/yellow] Expected PDF file, got {input_path.suffix}")
 
+    # Extract metadata from PDF for smart filename generation
+    from arxiv2rm.pdf_parser import PDFParser
+
+    parser = PDFParser(detect_columns=False)  # Quick parse for metadata only
+    metadata = parser.extract_metadata(input_path)
+
+    # Use CLI title override or extracted title
+    paper_title = title or metadata.get("title")
+    arxiv_id = metadata.get("arxiv_id")
+
     # Determine output path
-    output_path = Path(output) if output else input_path.with_suffix(".epub")
+    if output:
+        output_path = Path(output)
+    else:
+        # Generate smart filename from paper title and arxiv ID
+        output_path = generate_output_filename(input_path, paper_title, arxiv_id)
 
     console.print(f"[bold blue]Converting:[/bold blue] {input_path.name}")
+    if paper_title:
+        console.print(f"[dim]Detected title: {paper_title}[/dim]")
+    if arxiv_id:
+        console.print(f"[dim]ArXiv ID: {arxiv_id}[/dim]")
     console.print(f"[dim]Output: {output_path}[/dim]")
     console.print(f"[dim]OCR Engine: {ocr_engine}[/dim]")
     console.print(f"[dim]Image Quality: {image_quality}[/dim]")

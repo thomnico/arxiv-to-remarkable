@@ -129,9 +129,21 @@ class PDFToEPUBConverter:
         temp_dir = options.temp_dir or Path(tempfile.mkdtemp(prefix="arxiv2rm_"))
 
         try:
-            # Step 1: Analyze and extract from PDF
-            logger.info("Step 1: Analyzing PDF...")
-            pdf_result = self.pdf_parser.parse(input_path, temp_dir)
+            # Step 1: Extract matrix formulas FIRST (to exclude from text extraction)
+            logger.info("Step 1: Extracting matrix formulas...")
+            formula_dir = temp_dir / "formulas"
+            formula_images = self.pdf_parser.extract_matrix_formulas(input_path, formula_dir)
+            if formula_images:
+                logger.info(f"Extracted {len(formula_images)} matrix formulas")
+
+            # Step 2: Analyze and extract from PDF (with formula exclusions)
+            logger.info("Step 2: Analyzing and extracting PDF...")
+            # Pass formula regions to exclude their text from extraction
+            pdf_result = self.pdf_parser.parse(
+                input_path,
+                temp_dir,
+                exclude_regions=formula_images if formula_images else None,
+            )
             analysis = pdf_result["analysis"]
 
             stats = {
@@ -139,34 +151,37 @@ class PDFToEPUBConverter:
                 "images": analysis["image_count"],
                 "needs_ocr": analysis["needs_ocr"],
                 "is_two_column": analysis.get("column_layout", {}).get("is_two_column", False),
+                "formula_images": len(formula_images),
             }
 
             logger.info(
                 f"PDF Analysis: {stats['pages']} pages, "
                 f"{stats['images']} images, "
                 f"OCR needed: {stats['needs_ocr']}, "
-                f"Two-column: {stats['is_two_column']}"
+                f"Two-column: {stats['is_two_column']}, "
+                f"Formula images: {stats['formula_images']}"
             )
 
-            # Step 2: Extract and optimize images
-            logger.info("Step 2: Optimizing images...")
+            # Step 3: Extract and optimize images
+            logger.info("Step 3: Optimizing images...")
             optimized_images = self._optimize_images(
                 pdf_result.get("images", []),
                 temp_dir / "optimized_images",
             )
             stats["optimized_images"] = len(optimized_images)
 
-            # Step 3: Extract text content with inline figures
-            logger.info("Step 3: Extracting text...")
+            # Step 4: Extract text content with inline figures and formulas
+            logger.info("Step 4: Creating chapters...")
             pages = pdf_result.get("pages", [])
-            chapters = self._create_chapters(pages, optimized_images)
+            chapters = self._create_chapters(pages, optimized_images, formula_images)
             stats["chapters"] = len(chapters)
 
-            # Step 4: Build EPUB
-            logger.info("Step 4: Building EPUB...")
+            # Step 5: Build EPUB
+            logger.info("Step 5: Building EPUB...")
             epub_path = self._build_epub(
                 chapters,
                 optimized_images,
+                formula_images,
                 output_path,
                 options,
                 input_path,
@@ -258,15 +273,18 @@ class PDFToEPUBConverter:
         self,
         pages: List[Dict],
         optimized_images: List[Dict],
+        formula_images: Optional[List[Dict]] = None,
     ) -> List[Dict]:
         """
-        Create chapter structure from extracted pages with inline figures.
+        Create chapter structure from extracted pages with inline figures and formulas.
 
         Figures are inserted at their first mention in the text (e.g., "Figure 1", "Fig. 2").
+        Matrix formulas are inserted at their page positions.
 
         Args:
             pages: List of page dicts with text content
             optimized_images: List of image dicts with path, figure_num, page_num, type
+            formula_images: List of formula image dicts with page, bbox, img_path
 
         Returns:
             List of chapter dicts with title and HTML content
@@ -304,14 +322,34 @@ class PDFToEPUBConverter:
         # Convert to list sorted by figure number
         all_figures = [figures_by_num[k] for k in sorted(figures_by_num.keys())]
 
-        # Combine all text
-        all_text = "\n\n".join(page.get("text", "") for page in pages)
+        # Build formula lookup by page (for chapter detection only)
+        formulas_by_page: Dict[int, List[Dict]] = {}
+        if formula_images:
+            for formula in formula_images:
+                page_num = formula.get("page", 0)
+                if page_num not in formulas_by_page:
+                    formulas_by_page[page_num] = []
+                formulas_by_page[page_num].append(formula)
+
+        # Combine all text from pages
+        # NOTE: Formula placeholders are already inserted during text extraction
+        # (in pdf_parser.py) so we don't need to add them here
+        text_parts = []
+        for page in pages:
+            page_text = page.get("text", "")
+            text_parts.append(page_text)
+
+        all_text = "\n\n".join(text_parts)
 
         # First, try to detect chapter structure
-        detected_chapters = self._detect_chapters_with_figures(all_text, all_figures, pages)
+        detected_chapters = self._detect_chapters_with_figures(
+            all_text, all_figures, pages, formulas_by_page
+        )
 
         if not detected_chapters:
             # No clear chapter structure - create single chapter
+            # NOTE: Formula placeholders in text will be converted to HTML
+            # by _insert_figures_at_mentions via the formula_pattern regex
             html_content = self._insert_figures_at_mentions(all_text, all_figures)
             html_content += '\n<div class="notes-zone"></div>'
             return [{"title": "Content", "content": html_content}]
@@ -320,6 +358,26 @@ class PDFToEPUBConverter:
             for chapter in detected_chapters:
                 chapter["content"] += '\n<div class="notes-zone"></div>'
             return detected_chapters
+
+    def _generate_formula_html(self, formulas: List[Dict]) -> str:
+        """Generate HTML for formula images."""
+        if not formulas:
+            return ""
+
+        html_parts = []
+        for formula in formulas:
+            img_path = formula.get("img_path")
+            if img_path:
+                img_name = Path(img_path).name
+                page_num = formula.get("page", 0) + 1
+                html_parts.append(
+                    f"""
+<figure class="formula-figure">
+    <img src="images/{img_name}" alt="Formula from page {page_num}" class="formula-img"/>
+</figure>
+"""
+                )
+        return "\n".join(html_parts)
 
     def _insert_figures_at_mentions(
         self,
@@ -342,6 +400,21 @@ class PDFToEPUBConverter:
 
         # Convert text to HTML first
         html = self.text_converter.convert(text)
+
+        # Convert formula placeholders to actual HTML
+        # Pattern: [FORMULA_IMAGE:filename.png:pageN]
+        formula_pattern = re.compile(r"\[FORMULA_IMAGE:([^:]+):page(\d+)\]")
+
+        def formula_replacement(match):
+            img_name = match.group(1)
+            page_num = match.group(2)
+            return f"""
+<figure class="formula-figure">
+    <img src="images/{img_name}" alt="Formula from page {page_num}" class="formula-img"/>
+</figure>
+"""
+
+        html = formula_pattern.sub(formula_replacement, html)
 
         # Build lookup from figure number to figure dict
         figures_by_num: Dict[int, Dict] = {}
@@ -440,18 +513,21 @@ class PDFToEPUBConverter:
         text: str,
         figures: List[Dict],
         pages: List[Dict],
+        formulas_by_page: Optional[Dict[int, List[Dict]]] = None,
     ) -> List[Dict]:
         """
-        Detect chapters and insert figures at their first mention within each chapter.
+        Detect chapters and insert figures/formulas at their positions.
 
         Args:
             text: Full document text
             figures: List of figure dicts
             pages: List of page dicts
+            formulas_by_page: Dict mapping page number to formula dicts
 
         Returns:
             List of chapter dicts with title and content (figures at first mention)
         """
+        formulas_by_page = formulas_by_page or {}
         # Split text into lines
         lines = text.split("\n")
         chapters = []
@@ -505,6 +581,7 @@ class PDFToEPUBConverter:
             html_content = self._insert_figures_at_mentions(
                 content_text, figures, append_remaining=is_last_chapter
             )
+
             chapters.append({"title": title, "content": html_content})
 
         return chapters
@@ -754,6 +831,7 @@ class PDFToEPUBConverter:
         self,
         chapters: List[Dict],
         optimized_images: List[Dict],
+        formula_images: List[Dict],
         output_path: Path,
         options: ConversionOptions,
         input_path: Path,
@@ -764,6 +842,7 @@ class PDFToEPUBConverter:
         Args:
             chapters: List of chapter dicts
             optimized_images: List of image dicts with path, figure_num, page_num
+            formula_images: List of formula image dicts with page, bbox, img_path
             output_path: Output path for EPUB
             options: Conversion options
             input_path: Original input PDF path
@@ -801,6 +880,12 @@ class PDFToEPUBConverter:
         # Add all images to EPUB manifest
         for img in optimized_images:
             builder.add_image(img["path"])
+
+        # Add formula images to EPUB manifest
+        for formula in formula_images:
+            img_path = formula.get("img_path")
+            if img_path:
+                builder.add_image(img_path)
 
         # Add chapters
         for chapter in chapters:
