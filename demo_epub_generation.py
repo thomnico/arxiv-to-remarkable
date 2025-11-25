@@ -62,6 +62,8 @@ def demo_epub_generation(paper_id: str = "1706.03762", output_dir: Path = None):
     # Step 3: Optimize images
     print("🖼️  Step 3: Optimizing images for reMarkable...")
     optimized_images = []
+    image_path_to_filename = {}  # Map source image path to optimized filename
+
     if latex_doc.image_files:
         optimizer = ImageOptimizer()
         images_dir = output_dir / "images"
@@ -69,11 +71,20 @@ def demo_epub_generation(paper_id: str = "1706.03762", output_dir: Path = None):
 
         for i, img_path in enumerate(latex_doc.image_files, 1):
             try:
-                output_path = images_dir / f"figure_{i}_opt.jpg"
+                # Use sanitized image name to avoid duplicates
+                base_name = img_path.stem.replace("-", "_").replace(" ", "_")
+                output_filename = f"{base_name}_opt.jpg"
+                output_path = images_dir / output_filename
+
                 result = optimizer.optimize(img_path, output_path)
                 optimized_images.append(result)
+
+                # Store mapping from original figure image_path to optimized filename
+                # Multiple figures may reference the same image
+                image_path_to_filename[img_path.stem] = output_filename
+
                 size_kb = result.stat().st_size // 1024
-                print(f"   ✓ Optimized {img_path.name} → {size_kb}KB")
+                print(f"   ✓ Optimized {img_path.name} → {output_filename} ({size_kb}KB)")
             except Exception as e:
                 print(f"   ⚠️  Skipped {img_path.name}: {e}")
 

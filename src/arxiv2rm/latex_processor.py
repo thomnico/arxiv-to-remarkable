@@ -22,6 +22,7 @@ class Figure:
     image_path: Optional[str] = None
     source_file: Optional[Path] = None
     line_number: Optional[int] = None
+    source_section: Optional[str] = None  # Section title where figure appears
 
 
 @dataclass
@@ -35,6 +36,16 @@ class Section:
 
 
 @dataclass
+class MathFormula:
+    """Represents a mathematical formula in LaTeX."""
+
+    formula_id: str
+    latex_code: str
+    is_display: bool  # True for display equations, False for inline
+    line_number: Optional[int] = None
+
+
+@dataclass
 class LaTeXDocument:
     """Parsed LaTeX document with extracted content."""
 
@@ -43,6 +54,7 @@ class LaTeXDocument:
     abstract: Optional[str] = None
     sections: List[Section] = field(default_factory=list)
     figures: List[Figure] = field(default_factory=list)
+    math_formulas: List[MathFormula] = field(default_factory=list)
     references: Dict[str, int] = field(default_factory=dict)  # label -> figure number
     image_files: Set[Path] = field(default_factory=set)
     main_file: Optional[Path] = None
@@ -69,6 +81,7 @@ class LaTeXProcessor:
         self.latex_dir = latex_dir
         self.main_tex_file = main_tex_file
         self.figure_counter = 0
+        self.math_counter = 0
         logger.info(f"LaTeX processor initialized: {main_tex_file}")
 
     def process(self) -> LaTeXDocument:
@@ -93,6 +106,9 @@ class LaTeXProcessor:
         # Extract content recursively (handles \input and \include)
         self._extract_content(main_soup, doc, self.main_tex_file)
 
+        # Extract math formulas from raw content
+        self._extract_math_from_sections(doc)
+
         # Build reference map
         doc.references = self._build_reference_map(doc.figures)
 
@@ -102,6 +118,7 @@ class LaTeXProcessor:
         logger.info(
             f"Processed: {len(doc.sections)} sections, "
             f"{len(doc.figures)} figures, "
+            f"{len(doc.math_formulas)} math formulas, "
             f"{len(doc.image_files)} images"
         )
 
@@ -171,63 +188,89 @@ class LaTeXProcessor:
         r"""
         Extract content (sections, figures) from LaTeX tree.
 
-        Recursively processes \input and \include commands.
+        Recursively processes \input and \include commands IN DOCUMENT ORDER.
+        This maintains proper hierarchical structure.
         """
-        # Extract sections
-        for level, tag in [(1, "section"), (2, "subsection"), (3, "subsubsection")]:
-            for section_node in soup.find_all(tag):
-                try:
-                    title = self._node_to_text(section_node.args[0])
-                    content = self._extract_section_content(section_node)
-                    section = Section(level=level, title=title, content=content)
-                    doc.sections.append(section)
-                    logger.debug(f"Extracted {tag}: {title[:30]}...")
-                except Exception as e:
-                    logger.warning(f"Failed to extract {tag}: {e}")
+        # Build a map of figures to their surrounding section by parsing the raw text
+        figures_section_map = self._map_figures_to_sections(soup, current_file)
 
-        # Extract figures
+        # Build a map of input commands to their preceding sections
+        # This is critical for associating input file content with the right section
+        input_section_map = self._map_inputs_to_sections(soup, current_file)
+
+        # Process document in order to maintain section hierarchy
+        # Strategy: Process sections one by one, and immediately process their \input files
+        processed_inputs = set()
+
+        # Extract level 1 sections in order
+        for section_node in soup.find_all("section"):
+            try:
+                title = self._node_to_text(section_node.args[0])
+                content = self._extract_section_content(section_node)
+                section = Section(level=1, title=title, content=content)
+                doc.sections.append(section)
+                logger.debug(f"Extracted section: {title[:30]}...")
+
+                # Immediately process input files that belong to this section
+                for input_cmd in soup.find_all("input"):
+                    if id(input_cmd) in processed_inputs:
+                        continue
+
+                    input_file = self._resolve_input_file(input_cmd, current_file)
+                    if input_file and input_file.exists():
+                        input_name = input_file.stem
+                        mapped_section = input_section_map.get(input_name)
+
+                        if mapped_section == title:
+                            processed_inputs.add(id(input_cmd))
+                            doc.included_files.append(input_file)
+                            logger.debug(f"Processing \\input: {input_file} for section {title}")
+
+                            # Parse and process the input file
+                            input_soup = self._parse_file(input_file)
+
+                            # Check if contains sections
+                            has_sections = any(
+                                input_soup.find_all(tag) for tag in ["subsection", "subsubsection"]
+                            )
+
+                            if has_sections:
+                                # Extract subsections and add immediately after parent section
+                                self._extract_subsections(input_soup, doc, input_file)
+                            else:
+                                # Plain content - add to current section
+                                clean_content = self._node_to_text(input_soup)
+                                if clean_content.strip():
+                                    section.content += "\n\n" + clean_content
+                                    logger.debug(f"Added {len(clean_content)} chars to {title}")
+
+            except Exception as e:
+                logger.warning(f"Failed to extract section: {e}")
+
+        # Extract figures with section context from map
         for figure_node in soup.find_all("figure"):
             try:
-                figure = self._extract_figure(figure_node, current_file)
+                section_title = figures_section_map.get(id(figure_node))
+                figure = self._extract_figure(figure_node, current_file, section_title)
                 if figure:
                     doc.figures.append(figure)
             except Exception as e:
                 logger.warning(f"Failed to extract figure: {e}")
 
-        # Handle \input and \include - recursively extract sections and figures
+        # Process any remaining unprocessed input files
         for input_cmd in soup.find_all("input"):
-            try:
-                input_file = self._resolve_input_file(input_cmd, current_file)
-                if input_file and input_file.exists():
-                    logger.debug(f"Processing \\input: {input_file}")
-                    doc.included_files.append(input_file)
+            if id(input_cmd) not in processed_inputs:
+                try:
+                    input_file = self._resolve_input_file(input_cmd, current_file)
+                    if input_file and input_file.exists():
+                        processed_inputs.add(id(input_cmd))
+                        doc.included_files.append(input_file)
+                        logger.debug(f"Processing remaining \\input: {input_file}")
 
-                    # Parse the input file
-                    input_soup = self._parse_file(input_file)
-
-                    # Recursively extract sections and figures from input file
-                    self._extract_content(input_soup, doc, input_file)
-
-                    # Also extract raw content for the most recent section if no sections found
-                    # This handles input files that are just paragraph text
-                    if not any(
-                        input_soup.find_all(tag)
-                        for tag in ["section", "subsection", "subsubsection"]
-                    ):
-                        try:
-                            clean_content = self._node_to_text(input_soup)
-                            if doc.sections and clean_content.strip():
-                                # Append to the last section's content
-                                doc.sections[-1].content += "\n\n" + clean_content
-                                logger.debug(
-                                    f"Added {len(clean_content)} chars to {doc.sections[-1].title}"
-                                )
-                        except Exception as parse_error:
-                            logger.warning(
-                                f"Failed to extract text from {input_file}: {parse_error}"
-                            )
-            except Exception as e:
-                logger.warning(f"Failed to process \\input: {e}")
+                        input_soup = self._parse_file(input_file)
+                        self._extract_subsections(input_soup, doc, input_file)
+                except Exception as e:
+                    logger.warning(f"Failed to process remaining input: {e}")
 
         for include_cmd in soup.find_all("include"):
             try:
@@ -239,18 +282,28 @@ class LaTeXProcessor:
                     # Parse the include file
                     include_soup = self._parse_file(include_file)
 
-                    # Recursively extract sections and figures from include file
-                    self._extract_content(include_soup, doc, include_file)
-
-                    # Also extract raw content for the most recent section if no sections found
-                    if not any(
+                    # Check if this include file contains sections
+                    has_sections = any(
                         include_soup.find_all(tag)
                         for tag in ["section", "subsection", "subsubsection"]
-                    ):
+                    )
+
+                    if has_sections:
+                        # Recursively extract sections and figures from include file
+                        self._extract_content(include_soup, doc, include_file)
+                    else:
+                        # No sections - this is content for the most recent section
                         try:
                             clean_content = self._node_to_text(include_soup)
                             if doc.sections and clean_content.strip():
-                                doc.sections[-1].content += "\n\n" + clean_content
+                                # Find the most recent level-1 section to append to
+                                for section in reversed(doc.sections):
+                                    if section.level == 1:
+                                        section.content += "\n\n" + clean_content
+                                        logger.debug(
+                                            f"Added {len(clean_content)} chars to {section.title}"
+                                        )
+                                        break
                         except Exception as parse_error:
                             logger.warning(
                                 f"Failed to extract text from {include_file}: {parse_error}"
@@ -258,19 +311,188 @@ class LaTeXProcessor:
             except Exception as e:
                 logger.warning(f"Failed to process \\include: {e}")
 
-    def _extract_figure(self, figure_node: TexNode, source_file: Path) -> Optional[Figure]:
+    def _extract_subsections(self, soup: TexNode, doc: LaTeXDocument, current_file: Path):
+        """
+        Extract subsections (level 2 and 3) from soup and add to doc.
+
+        This also extracts content between subsections from the raw text.
+        Also extracts figures from this file.
+
+        Args:
+            soup: TexSoup parsed document
+            doc: LaTeXDocument to add subsections to
+            current_file: Current .tex file
+        """
+        # Extract figures from this file first
+        # Map figures to sections for proper placement
+        figures_section_map = self._map_figures_to_sections(soup, current_file)
+
+        for figure_node in soup.find_all("figure"):
+            try:
+                section_title = figures_section_map.get(id(figure_node))
+                figure = self._extract_figure(figure_node, current_file, section_title)
+                if figure:
+                    doc.figures.append(figure)
+                    logger.debug(f"Extracted figure {figure.number} from {current_file.name}")
+            except Exception as e:
+                logger.warning(f"Failed to extract figure from {current_file.name}: {e}")
+
+        # Get raw text to extract content between sections
+        raw_text = str(soup)
+
+        # Find all subsection/subsubsection positions
+        import re
+
+        subsection_pattern = r"\\(subsection|subsubsection)\{([^}]+)\}"
+        matches = list(re.finditer(subsection_pattern, raw_text))
+
+        # Extract content between sections from raw text
+        for i, match in enumerate(matches):
+            level = 2 if match.group(1) == "subsection" else 3
+            title = self._node_to_text(TexSoup(match.group(2)))
+
+            # Find content start (after this section header)
+            content_start = match.end()
+
+            # Find content end (before next section or end of file)
+            if i + 1 < len(matches):
+                content_end = matches[i + 1].start()
+            else:
+                content_end = len(raw_text)
+
+            # Extract and clean content
+            raw_content = raw_text[content_start:content_end]
+            clean_content = self._node_to_text(TexSoup(raw_content))
+
+            section = Section(level=level, title=title, content=clean_content)
+            doc.sections.append(section)
+            section_type = "subsection" if level == 2 else "subsubsection"
+            logger.debug(
+                f"Extracted {section_type}: {title[:30]}... " f"({len(clean_content)} chars)"
+            )
+
+    def _map_inputs_to_sections(self, soup: TexNode, current_file: Path) -> Dict[str, str]:
+        r"""
+        Map input/include commands to their preceding section.
+
+        This analyzes the raw LaTeX text to determine which section each
+        \input command belongs to.
+
+        Args:
+            soup: TexSoup parsed document
+            current_file: Current .tex file
+
+        Returns:
+            Dict mapping input filename to section title
+        """
+        input_map = {}
+
+        try:
+            # Get raw text
+            raw_text = str(soup)
+
+            # Find all section positions and input positions
+            section_pattern = r"\\section\{([^}]+)\}"
+            input_pattern = r"\\input\{([^}]+)\}"
+
+            sections = [(m.start(), m.group(1)) for m in re.finditer(section_pattern, raw_text)]
+            input_matches = [(m.start(), m.group(1)) for m in re.finditer(input_pattern, raw_text)]
+
+            # Map each input filename to the most recent section before it
+            for input_pos, input_name in input_matches:
+                # Find the most recent section before this input
+                section_title = None
+                for sec_pos, sec_title in reversed(sections):
+                    if sec_pos < input_pos:
+                        section_title = sec_title
+                        break
+
+                if section_title:
+                    # Clean up section title and store by input filename
+                    section_title = self._node_to_text(TexSoup(section_title))
+                    input_map[input_name] = section_title
+                    logger.debug(f"Mapped \\input{{{input_name}}} -> section '{section_title}'")
+
+            logger.debug(f"Mapped {len(input_map)} inputs to sections")
+
+        except Exception as e:
+            logger.warning(f"Failed to map inputs to sections: {e}")
+
+        return input_map
+
+    def _map_figures_to_sections(self, soup: TexNode, current_file: Path) -> Dict[int, str]:
+        """
+        Map figure nodes to their containing section by analyzing document structure.
+
+        This uses a simpler heuristic: scan through the raw LaTeX text to find
+        which section/subsection each figure appears after.
+
+        Args:
+            soup: TexSoup parsed document
+            current_file: Current .tex file
+
+        Returns:
+            Dict mapping figure node id to section title (or subsection title as fallback)
+        """
+        figure_map = {}
+
+        try:
+            # Get raw text
+            raw_text = str(soup)
+
+            # Find all section/subsection positions and figure positions
+            # Look for both \section and \subsection
+            section_pattern = r"\\(section|subsection)\{([^}]+)\}"
+            figure_pattern = r"\\begin\{figure\}"
+
+            sections = [(m.start(), m.group(2)) for m in re.finditer(section_pattern, raw_text)]
+            figure_positions = [m.start() for m in re.finditer(figure_pattern, raw_text)]
+
+            # Map each figure to the most recent section/subsection before it
+            figure_nodes = list(soup.find_all("figure"))
+
+            for fig_idx, fig_pos in enumerate(figure_positions):
+                if fig_idx < len(figure_nodes):
+                    # Find the most recent section/subsection before this figure
+                    section_title = None
+                    for sec_pos, sec_title in reversed(sections):
+                        if sec_pos < fig_pos:
+                            section_title = sec_title
+                            break
+
+                    if section_title:
+                        # Clean up section title
+                        section_title = self._node_to_text(TexSoup(section_title))
+                        figure_map[id(figure_nodes[fig_idx])] = section_title
+                        logger.debug(
+                            f"Mapped figure {fig_idx+1} to section/subsection '{section_title}'"
+                        )
+
+            logger.debug(f"Mapped {len(figure_map)} figures to sections")
+
+        except Exception as e:
+            logger.warning(f"Failed to map figures to sections: {e}")
+
+        return figure_map
+
+    def _extract_figure(
+        self, figure_node: TexNode, source_file: Path, section_title: Optional[str] = None
+    ) -> Optional[Figure]:
         """
         Extract figure information from figure environment.
 
         Args:
             figure_node: TexSoup figure node
             source_file: Source .tex file
+            section_title: Title of the section containing this figure
 
         Returns:
             Figure object or None if extraction fails
         """
         self.figure_counter += 1
-        figure = Figure(number=self.figure_counter, source_file=source_file)
+        figure = Figure(
+            number=self.figure_counter, source_file=source_file, source_section=section_title
+        )
 
         # Extract \includegraphics
         try:
@@ -359,6 +581,15 @@ class LaTeXProcessor:
         text = re.sub(r"\\ref\{[^}]+\}", "", text)
         text = re.sub(r"\\label\{[^}]+\}", "", text)
         text = re.sub(r"\\thanks\{[^}]+\}", "", text)  # Remove footnotes
+
+        # Remove table/figure environments and their content
+        text = re.sub(
+            r"\\begin\{(table|tabular|center|minipage)\}.*?\\end\{\1\}", "", text, flags=re.DOTALL
+        )
+
+        # Replace Figure~ with Figure (remove non-breaking space)
+        text = re.sub(r"Figure~\\ref\{[^}]+\}", "Figure", text)
+        text = re.sub(r"Figure~", "Figure ", text)
 
         # Remove author separators
         text = re.sub(r"\\AND\s+", ", ", text)
@@ -486,6 +717,71 @@ class LaTeXProcessor:
                     return candidate
 
         return None
+
+    def _extract_math_from_sections(self, doc: LaTeXDocument):
+        """
+        Extract math formulas from section content.
+
+        This method finds inline math ($...$) and display math
+        (equation, align, etc.) in section content.
+
+        Args:
+            doc: LaTeXDocument to extract math from
+        """
+        # Process abstract if present
+        if doc.abstract:
+            self._extract_math_from_text(doc.abstract, doc)
+
+        # Process all sections
+        for section in doc.sections:
+            if section.content:
+                self._extract_math_from_text(section.content, doc)
+
+    def _extract_math_from_text(self, text: str, doc: LaTeXDocument):
+        """
+        Extract math formulas from text content.
+
+        Args:
+            text: Text content containing LaTeX math
+            doc: LaTeXDocument to add formulas to
+        """
+        # Extract inline math: $...$
+        inline_pattern = r"\$([^\$]+)\$"
+        for match in re.finditer(inline_pattern, text):
+            self.math_counter += 1
+            formula = MathFormula(
+                formula_id=f"inline_{self.math_counter}",
+                latex_code=match.group(1),
+                is_display=False,
+            )
+            doc.math_formulas.append(formula)
+            logger.debug(f"Extracted inline math: {formula.latex_code[:30]}...")
+
+        # Extract display math: \begin{equation}...\end{equation}
+        display_envs = ["equation", "equation*", "align", "align*", "eqnarray", "eqnarray*"]
+        for env in display_envs:
+            pattern = rf"\\begin\{{{env}\}}(.*?)\\end\{{{env}\}}"
+            for match in re.finditer(pattern, text, re.DOTALL):
+                self.math_counter += 1
+                formula = MathFormula(
+                    formula_id=f"display_{self.math_counter}",
+                    latex_code=match.group(1).strip(),
+                    is_display=True,
+                )
+                doc.math_formulas.append(formula)
+                logger.debug(f"Extracted display math ({env}): {formula.latex_code[:30]}...")
+
+        # Extract display math: \[...\]
+        display_bracket_pattern = r"\\\[(.*?)\\\]"
+        for match in re.finditer(display_bracket_pattern, text, re.DOTALL):
+            self.math_counter += 1
+            formula = MathFormula(
+                formula_id=f"display_{self.math_counter}",
+                latex_code=match.group(1).strip(),
+                is_display=True,
+            )
+            doc.math_formulas.append(formula)
+            logger.debug(f"Extracted display math []: {formula.latex_code[:30]}...")
 
 
 def process_latex_source(latex_dir: Path, main_tex_file: Path) -> LaTeXDocument:

@@ -273,6 +273,20 @@ nav li {
     text-align: center;
     margin: 1em 0;
 }
+
+/* Notes section - ruled area for handwritten notes */
+.notes-section {
+    margin-top: 4em;
+    padding-top: 1em;
+    border-top: 2px solid #000000;
+    page-break-inside: avoid;
+}
+
+.notes-line {
+    height: 2em;
+    border-bottom: 1px solid #CCCCCC;
+    margin: 0;
+}
 """
 
 

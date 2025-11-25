@@ -1,15 +1,17 @@
 """EPUB builder for reMarkable-optimized ebooks."""
 
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from ebooklib import epub
 
 from arxiv2rm.latex_processor import LaTeXDocument, Section
+from arxiv2rm.math_renderer import MathFormula, MathRenderer
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,7 @@ class EPUBBuilder:
         self,
         metadata: EPUBMetadata,
         output_path: Optional[Path] = None,
+        render_math: bool = True,
     ):
         """
         Initialize EPUB builder.
@@ -42,6 +45,7 @@ class EPUBBuilder:
         Args:
             metadata: EPUB metadata (title, authors, etc.)
             output_path: Path to save EPUB file
+            render_math: Whether to render math formulas to images (default: True)
         """
         self.metadata = metadata
         self.output_path = output_path
@@ -50,6 +54,9 @@ class EPUBBuilder:
         self.spine = ["nav"]
         self.toc = []
         self.latex_doc = None  # Store LaTeX doc for figure references
+        self.render_math = render_math
+        self.math_renderer = MathRenderer() if render_math else None
+        self.rendered_math: Dict[str, Path] = {}  # formula_id -> image path
 
         # Generate UUID if not provided
         if not metadata.identifier:
@@ -84,6 +91,10 @@ class EPUBBuilder:
 
         # Set metadata
         self._set_metadata()
+
+        # Render math formulas if enabled
+        if self.render_math and latex_doc.math_formulas:
+            self._render_math_formulas(latex_doc.math_formulas)
 
         # Create abstract chapter if present
         if latex_doc.abstract:
@@ -259,13 +270,40 @@ class EPUBBuilder:
                 if para:
                     html += f"<p>{self._escape_html(para)}</p>\n"
 
-        # Add figures for this chapter (if any)
+        # Add figures for this chapter (only figures that belong to this section)
         if self.latex_doc and self.latex_doc.figures:
-            # Find figures that might belong to this chapter
-            # (simple heuristic: include all figures for now, can be refined)
-            for idx, figure in enumerate(self.latex_doc.figures):
-                # Check if we've embedded this image
-                figure_filename = f"figure_{idx + 1}_opt.jpg"
+            # Filter figures by section - include figures that match:
+            # 1. The main section title
+            # 2. Any subsection title in this chapter
+            # 3. If source_section is None, include in first chapter only
+            is_first_chapter = (
+                self.latex_doc.sections and main_section == self.latex_doc.sections[0]
+            )
+
+            # Build list of all section/subsection titles in this chapter
+            chapter_section_titles = {main_section.title}
+            for subsection in subsections:
+                chapter_section_titles.add(subsection.title)
+
+            chapter_figures = [
+                (idx, fig)
+                for idx, fig in enumerate(self.latex_doc.figures)
+                if fig.source_section in chapter_section_titles
+                or (fig.source_section is None and is_first_chapter)
+            ]
+
+            for idx, figure in chapter_figures:
+                # Determine image filename from figure's image_path
+                # Extract just the filename without extension and sanitize
+                if figure.image_path:
+                    # Handle paths like "Figures/ModalNet-21" -> "ModalNet_21_opt.jpg"
+                    from pathlib import Path
+
+                    img_stem = Path(figure.image_path).stem.replace("-", "_").replace(" ", "_")
+                    figure_filename = f"{img_stem}_opt.jpg"
+                else:
+                    # Fallback to index-based naming
+                    figure_filename = f"figure_{figure.number}_opt.jpg"
 
                 caption_text = f": {self._escape_html(figure.caption)}" if figure.caption else ""
                 html += f"""
@@ -287,12 +325,50 @@ class EPUBBuilder:
                     if para:
                         html += f"<p>{self._escape_html(para)}</p>\n"
 
+        # Add notes section at the end of the chapter
+        html += self._build_notes_section()
+
         html += """
         </body>
         </html>
         """
 
+        # Replace math formulas with images if enabled
+        if self.render_math:
+            html = self._replace_math_in_content(html)
+
         return html
+
+    def _build_notes_section(self) -> str:
+        """
+        Build a notes section for handwritten annotations.
+
+        Creates a blank area with ruled lines that takes up approximately
+        20% of the vertical space, suitable for reMarkable stylus notes.
+
+        Returns:
+            HTML string for notes section
+        """
+        # Create a section with ruled lines for notes
+        # Using multiple divs with border-bottom to create ruled lines
+        lines = []
+        line_style = "height: 2em; border-bottom: 1px solid #CCCCCC; margin: 0;"
+        for i in range(8):  # 8 ruled lines for notes
+            lines.append(f'<div class="notes-line" style="{line_style}"></div>')
+
+        notes_style = (
+            "margin-top: 4em; padding-top: 1em; "
+            "border-top: 2px solid #000000; page-break-inside: avoid;"
+        )
+        label_style = "font-size: 10pt; font-style: italic; " "color: #666666; margin-bottom: 1em;"
+
+        notes_html = f"""
+        <div class="notes-section" style="{notes_style}">
+            <p style="{label_style}">Notes:</p>
+            {''.join(lines)}
+        </div>
+        """
+        return notes_html
 
     def _build_navigation(self):
         """Build EPUB navigation (TOC)."""
@@ -396,6 +472,115 @@ class EPUBBuilder:
         self.book.add_item(image)
 
         logger.debug(f"Added image: {image_name}")
+
+    def _render_math_formulas(self, formulas: List[MathFormula]):
+        """
+        Render math formulas to images and add to EPUB.
+
+        Args:
+            formulas: List of math formulas to render
+        """
+        import tempfile
+
+        logger.info(f"Rendering {len(formulas)} math formulas...")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+
+            for formula in formulas:
+                try:
+                    # Render formula to image
+                    output_path = tmpdir_path / f"{formula.formula_id}.png"
+                    rendered_path = self.math_renderer.render(formula, output_path)
+
+                    if rendered_path:
+                        # Add image to EPUB
+                        self.add_image(rendered_path, f"{formula.formula_id}.png")
+                        self.rendered_math[formula.formula_id] = rendered_path
+                        logger.debug(f"Rendered math formula: {formula.formula_id}")
+                    else:
+                        logger.warning(f"Failed to render math formula: {formula.formula_id}")
+
+                except Exception as e:
+                    logger.error(f"Error rendering math {formula.formula_id}: {e}")
+
+        logger.info(f"Rendered {len(self.rendered_math)} math formulas")
+
+    def _replace_math_in_content(self, content: str) -> str:
+        """
+        Replace LaTeX math with image tags in HTML content.
+
+        Args:
+            content: HTML content with LaTeX math
+
+        Returns:
+            HTML content with math replaced by images
+        """
+        if not self.render_math or not self.latex_doc:
+            return content
+
+        # Replace inline math: $...$
+        def replace_inline(match):
+            latex_code = match.group(1)
+            # Find matching formula
+            for formula in self.latex_doc.math_formulas:
+                if formula.latex_code == latex_code and not formula.is_display:
+                    if formula.formula_id in self.rendered_math:
+                        return (
+                            f'<span class="math-inline">'
+                            f'<img src="images/{formula.formula_id}.png" '
+                            f'alt="{self._escape_html(latex_code)}" '
+                            f'style="display: inline; vertical-align: middle;"/>'
+                            f"</span>"
+                        )
+            # If not found, leave as-is
+            return match.group(0)
+
+        content = re.sub(r"\$([^\$]+)\$", replace_inline, content)
+
+        # Replace display math environments
+        display_envs = ["equation", "equation*", "align", "align*", "eqnarray", "eqnarray*"]
+        for env in display_envs:
+            pattern = rf"\\begin\{{{env}\}}(.*?)\\end\{{{env}\}}"
+
+            def replace_display(match):
+                latex_code = match.group(1).strip()
+                # Find matching formula
+                for formula in self.latex_doc.math_formulas:
+                    if formula.latex_code == latex_code and formula.is_display:
+                        if formula.formula_id in self.rendered_math:
+                            return (
+                                f'<div class="math-display">'
+                                f'<img src="images/{formula.formula_id}.png" '
+                                f'alt="{self._escape_html(latex_code)}" '
+                                f'class="equation-image"/>'
+                                f"</div>"
+                            )
+                # If not found, leave as-is
+                return match.group(0)
+
+            content = re.sub(pattern, replace_display, content, flags=re.DOTALL)
+
+        # Replace \[...\] display math
+        def replace_bracket_display(match):
+            latex_code = match.group(1).strip()
+            # Find matching formula
+            for formula in self.latex_doc.math_formulas:
+                if formula.latex_code == latex_code and formula.is_display:
+                    if formula.formula_id in self.rendered_math:
+                        return (
+                            f'<div class="math-display">'
+                            f'<img src="images/{formula.formula_id}.png" '
+                            f'alt="{self._escape_html(latex_code)}" '
+                            f'class="equation-image"/>'
+                            f"</div>"
+                        )
+            # If not found, leave as-is
+            return match.group(0)
+
+        content = re.sub(r"\\\[(.*?)\\\]", replace_bracket_display, content, flags=re.DOTALL)
+
+        return content
 
     def write(self, output_path: Optional[Path] = None):
         """
