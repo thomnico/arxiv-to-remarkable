@@ -49,6 +49,7 @@ class EPUBBuilder:
         self.chapters = []
         self.spine = ["nav"]
         self.toc = []
+        self.latex_doc = None  # Store LaTeX doc for figure references
 
         # Generate UUID if not provided
         if not metadata.identifier:
@@ -71,6 +72,9 @@ class EPUBBuilder:
             EpubBook object ready to write
         """
         logger.info("Building EPUB from LaTeX document...")
+
+        # Store latex_doc for figure references
+        self.latex_doc = latex_doc
 
         # Use LaTeX metadata if available
         if latex_doc.title:
@@ -247,16 +251,41 @@ class EPUBBuilder:
             <h1>{self._escape_html(main_section.title)}</h1>
         """
 
-        # Main section content
+        # Main section content - split into paragraphs
         if main_section.content:
-            html += f"<p>{self._escape_html(main_section.content)}</p>\n"
+            paragraphs = main_section.content.split("\n\n")
+            for para in paragraphs:
+                para = para.strip()
+                if para:
+                    html += f"<p>{self._escape_html(para)}</p>\n"
+
+        # Add figures for this chapter (if any)
+        if self.latex_doc and self.latex_doc.figures:
+            # Find figures that might belong to this chapter
+            # (simple heuristic: include all figures for now, can be refined)
+            for idx, figure in enumerate(self.latex_doc.figures):
+                # Check if we've embedded this image
+                figure_filename = f"figure_{idx + 1}_opt.jpg"
+
+                caption_text = f": {self._escape_html(figure.caption)}" if figure.caption else ""
+                html += f"""
+            <figure id="fig{figure.number}">
+                <img src="images/{figure_filename}" alt="Figure {figure.number}"/>
+                <figcaption>Figure {figure.number}{caption_text}</figcaption>
+            </figure>
+"""
 
         # Subsections
         for subsection in subsections:
             heading_level = min(subsection.level, 6)  # h2-h6 (h1 is chapter title)
             html += f"<h{heading_level}>{self._escape_html(subsection.title)}</h{heading_level}>\n"
             if subsection.content:
-                html += f"<p>{self._escape_html(subsection.content)}</p>\n"
+                # Split subsection content into paragraphs too
+                paragraphs = subsection.content.split("\n\n")
+                for para in paragraphs:
+                    para = para.strip()
+                    if para:
+                        html += f"<p>{self._escape_html(para)}</p>\n"
 
         html += """
         </body>

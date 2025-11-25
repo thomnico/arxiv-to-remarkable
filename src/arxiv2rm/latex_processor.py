@@ -194,15 +194,38 @@ class LaTeXProcessor:
             except Exception as e:
                 logger.warning(f"Failed to extract figure: {e}")
 
-        # Handle \input and \include
+        # Handle \input and \include - recursively extract sections and figures
         for input_cmd in soup.find_all("input"):
             try:
                 input_file = self._resolve_input_file(input_cmd, current_file)
                 if input_file and input_file.exists():
                     logger.debug(f"Processing \\input: {input_file}")
                     doc.included_files.append(input_file)
+
+                    # Parse the input file
                     input_soup = self._parse_file(input_file)
+
+                    # Recursively extract sections and figures from input file
                     self._extract_content(input_soup, doc, input_file)
+
+                    # Also extract raw content for the most recent section if no sections found
+                    # This handles input files that are just paragraph text
+                    if not any(
+                        input_soup.find_all(tag)
+                        for tag in ["section", "subsection", "subsubsection"]
+                    ):
+                        try:
+                            clean_content = self._node_to_text(input_soup)
+                            if doc.sections and clean_content.strip():
+                                # Append to the last section's content
+                                doc.sections[-1].content += "\n\n" + clean_content
+                                logger.debug(
+                                    f"Added {len(clean_content)} chars to {doc.sections[-1].title}"
+                                )
+                        except Exception as parse_error:
+                            logger.warning(
+                                f"Failed to extract text from {input_file}: {parse_error}"
+                            )
             except Exception as e:
                 logger.warning(f"Failed to process \\input: {e}")
 
@@ -212,8 +235,26 @@ class LaTeXProcessor:
                 if include_file and include_file.exists():
                     logger.debug(f"Processing \\include: {include_file}")
                     doc.included_files.append(include_file)
+
+                    # Parse the include file
                     include_soup = self._parse_file(include_file)
+
+                    # Recursively extract sections and figures from include file
                     self._extract_content(include_soup, doc, include_file)
+
+                    # Also extract raw content for the most recent section if no sections found
+                    if not any(
+                        include_soup.find_all(tag)
+                        for tag in ["section", "subsection", "subsubsection"]
+                    ):
+                        try:
+                            clean_content = self._node_to_text(include_soup)
+                            if doc.sections and clean_content.strip():
+                                doc.sections[-1].content += "\n\n" + clean_content
+                        except Exception as parse_error:
+                            logger.warning(
+                                f"Failed to extract text from {include_file}: {parse_error}"
+                            )
             except Exception as e:
                 logger.warning(f"Failed to process \\include: {e}")
 
@@ -264,10 +305,23 @@ class LaTeXProcessor:
         return figure if figure.image_path else None
 
     def _extract_section_content(self, section_node: TexNode) -> str:
-        """Extract text content from a section."""
+        r"""
+        Extract text content from a section.
+
+        Note: This extracts content directly from the section node.
+        Content from \input files is handled separately.
+        """
         try:
-            # Get everything after the section title
-            content = self._node_to_text(section_node)
+            # Try to get text content from the section node
+            # TexSoup doesn't directly give us paragraph content, so we extract from string
+            section_str = str(section_node)
+
+            # Remove the \section{title} part to get just content
+            section_str = re.sub(r"^\\[a-z]+\{[^}]+\}", "", section_str, count=1)
+
+            # Clean up the content
+            content = self._node_to_text(TexSoup(section_str))
+
             return content
         except Exception as e:
             logger.warning(f"Failed to extract section content: {e}")
@@ -293,13 +347,25 @@ class LaTeXProcessor:
         # Remove braces
         text = re.sub(r"^\{+|\}+$", "", text)
 
+        # Remove environment markers (TexSoup converts \begin{X} to \beginX)
+        text = re.sub(r"\\begin[a-zA-Z]+", "", text)
+        text = re.sub(r"\\end[a-zA-Z]+", "", text)
+
         # Remove common LaTeX commands with their braces
         text = re.sub(r"\\textbf\{([^}]+)\}", r"\1", text)
         text = re.sub(r"\\textit\{([^}]+)\}", r"\1", text)
         text = re.sub(r"\\emph\{([^}]+)\}", r"\1", text)
-        text = re.sub(r"\\cite\{[^}]+\}", "", text)
+        text = re.sub(r"\\cite[a-z]*\{[^}]+\}", "", text)  # \cite, \citep, \citet
         text = re.sub(r"\\ref\{[^}]+\}", "", text)
         text = re.sub(r"\\label\{[^}]+\}", "", text)
+        text = re.sub(r"\\thanks\{[^}]+\}", "", text)  # Remove footnotes
+
+        # Remove author separators
+        text = re.sub(r"\\AND\s+", ", ", text)
+        text = re.sub(r"\\and\s+", ", ", text)
+
+        # Remove remaining common commands
+        text = re.sub(r"\\[a-zA-Z]+\*?\s*", " ", text)  # \command or \command*
 
         # Remove remaining braces
         text = re.sub(r"[\{\}]", "", text)
