@@ -46,10 +46,13 @@ dependencies = [
     "opencv-python>=4.8.0",
     "numpy>=1.24.0",
 
-    # EPUB Generation
+    # EPUB Generation (legacy)
     "ebooklib>=0.18",
     "beautifulsoup4>=4.12.0",
     "lxml>=4.9.0",
+
+    # PDF Generation (primary output format)
+    "reportlab>=4.0.0",
 
     # HTTP Requests
     "requests>=2.31.0",

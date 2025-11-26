@@ -1,5 +1,8 @@
 # ArXiv to reMarkable - Task Breakdown
 
+> **Note**: Output format changed from EPUB to **PDF** per [ADR-002](docs/ADR-002-pdf-output-format.md).
+> EPUB had critical rendering issues on reMarkable (blank pages, missing word spaces).
+
 ## Phase 1: MVP - Core Infrastructure (Weeks 1-6)
 
 ### Epic 1: Project Setup & Configuration
@@ -23,6 +26,7 @@
 #### Task 1.3: CLI Framework Setup
 - Implement Click-based CLI structure
 - Add `convert`, `batch`, `config` commands
+- Add `--font-size` flag (12/14/16/18pt)
 - Implement progress bars
 - Add logging configuration
 **Dependencies**: 1.1, 1.2
@@ -40,24 +44,31 @@
 - Implement caching mechanism
 **Dependencies**: 1.1, 1.2
 
-#### Task 2.2: LaTeX Source Processor
+#### Task 2.2: LaTeX Source Processor (to PDF)
+
 - Extract .tar.gz archives
 - Parse main .tex file (identify structure)
 - Extract figures/images from LaTeX
 - Extract text content with structure
 - Handle multi-file LaTeX projects
+- **Output**: Structured content for PDF generation
+
 **Dependencies**: 2.1
 
 ---
 
-### Epic 3: PDF Processing
+### Epic 3: PDF Processing (Input)
+
 **Priority**: P0 | **Estimated**: 1 week
 
-#### Task 3.1: PDF Text Extraction
-- Implement PyMuPDF-based text extraction
+#### Task 3.1: PDF Text Extraction (PyMuPDF)
+
+- Implement PyMuPDF-based text extraction (preserves word spacing)
+- **Do NOT use pdfplumber** (loses spacing on certain PDFs)
 - Detect text layer presence
 - Extract document structure (headings, paragraphs)
 - Extract metadata (title, authors)
+
 **Dependencies**: 1.1
 
 #### Task 3.2: PDF Image Extraction
@@ -87,37 +98,49 @@
 
 ---
 
-### Epic 5: EPUB Generation
+### Epic 5: PDF Generation (Output) — *Changed from EPUB*
+
 **Priority**: P0 | **Estimated**: 2 weeks
 
-#### Task 5.1: EPUB Structure Builder
-- Create EPUB 3.0 package (ebooklib)
-- Generate metadata (title, author, language)
-- Create navigation (Table of Contents)
+> See [ADR-002](docs/ADR-002-pdf-output-format.md) for rationale.
+
+#### Task 5.1: PDFBuilder with reportlab
+
+- Create `PDFBuilder` class using reportlab
+- Set page size to 1404×1872px (reMarkable 1)
+- Configure margins (72pt = 1 inch)
 - Implement chapter/section structure
+- Generate metadata (title, author)
+
 **Dependencies**: 1.1
 
-#### Task 5.2: HTML Content Generation
-- Convert text to semantic HTML (h1, h2, p)
+#### Task 5.2: Text Layout & Font Embedding
+
+- Implement text flow with proper word spacing
+- Glyph-level positioning (no spacing issues)
+- Support configurable font size (12/14/16/18pt, default 14)
 - Handle paragraphs and line breaks
-- Embed images with figure tags
-- Add image captions
-- Generate image references
+- Embed images inline with text
+
 **Dependencies**: 5.1
 
-#### Task 5.3: CSS Styling
-- Create base CSS stylesheet
-- Embed OpenDyslexic font files
-- Define typography (font-family, line-height)
-- Set margins and spacing (em units)
-- Add chapter breaks (page-break-after)
+#### Task 5.3: OpenDyslexic Font Integration
+
+- Embed OpenDyslexic font directly in PDF
+- Register font with reportlab
+- Set as default font family
+- Configure line-height for readability
+
 **Dependencies**: 5.2
 
-#### Task 5.4: EPUB Assembly & Validation
-- Package HTML + CSS + images + fonts
-- Validate EPUB 3.0 compliance (epubcheck)
-- Test with EPUB readers
-- Verify file size (<50MB target)
+#### Task 5.4: PDF Assembly & Validation
+
+- Generate final PDF with embedded fonts + images
+- Add table of contents / bookmarks
+- Validate PDF renders correctly
+- Test on reMarkable device (no blank pages!)
+- Verify file size reasonable
+
 **Dependencies**: 5.3
 
 ---
@@ -128,7 +151,7 @@
 #### Task 6.1: rmapi Integration
 - Install/detect rmapi binary
 - Implement rmapi wrapper
-- Upload EPUB to device
+- Upload PDF to device
 - Create folders (e.g., "Research")
 - Handle upload errors
 **Dependencies**: 5.4
@@ -202,11 +225,13 @@
 - Support CSS customization
 **Dependencies**: 1.2, 1.3
 
-#### Task 9.2: EPUB Theme System
-- Create default CSS theme
-- Add high-contrast theme
-- Add compact theme
-- Allow user CSS injection
+#### Task 9.2: PDF Typography Presets
+
+- Create default typography preset
+- Add high-contrast preset for e-ink
+- Add compact preset (smaller font, more text per page)
+- Support custom font size via CLI
+
 **Dependencies**: 5.3, 9.1
 **Priority**: P2
 
@@ -218,26 +243,32 @@
 **Priority**: P0 | **Estimated**: 2 weeks
 
 #### Task 10.1: Unit Tests
+
 - Test ArXiv client (mock API)
-- Test PDF extraction
+- Test PDF extraction (PyMuPDF)
 - Test image optimization
-- Test EPUB generation
+- Test PDF generation (PDFBuilder)
 - Target >80% coverage
+
 **Dependencies**: All previous tasks
 
 #### Task 10.2: Integration Tests
-- End-to-end test (ArXiv URL → EPUB)
+
+- End-to-end test (ArXiv URL → PDF)
 - Test batch processing
 - Test error scenarios
 - Test on actual reMarkable 1
+
 **Dependencies**: 10.1
 
-#### Task 10.3: EPUB Quality Tests
-- Validate 50 sample papers
-- Test on reMarkable 1 device
-- Verify font size adjustment
+#### Task 10.3: PDF Quality Tests
+
+- Validate 50 sample papers converted to PDF
+- Test on reMarkable 1 device (no blank pages!)
+- Verify font rendering at different sizes
 - Check image display quality
 - Measure conversion times
+
 **Dependencies**: 10.2
 
 ---
@@ -260,9 +291,11 @@
 **Dependencies**: 11.1
 
 #### Task 11.3: Example Gallery
-- Convert 10 sample papers
-- Create EPUB gallery with screenshots
+
+- Convert 10 sample papers to PDF
+- Create PDF gallery with screenshots on reMarkable
 - Document common use cases
+
 **Dependencies**: 10.3, 11.1
 
 ---
@@ -330,10 +363,12 @@
 **Dependencies**: All core features
 
 #### Task 14.2: Frontend UI
+
 - Drag-and-drop upload
 - URL input field
-- Settings panel
-- EPUB preview
+- Settings panel (font size, etc.)
+- PDF preview
+
 **Dependencies**: 14.1
 
 ---

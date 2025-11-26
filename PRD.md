@@ -3,7 +3,7 @@
 ## 1. Executive Summary
 
 ### Vision
-Create a specialized tool that transforms scientific papers from various sources (ArXiv, IEEE, ACM, local PDFs) into optimized, readable EPUB ebooks for the reMarkable e-ink tablet, with enhanced typography, OCR capabilities, and integrated note-taking spaces.
+Create a specialized tool that transforms scientific papers from various sources (ArXiv, IEEE, ACM, local PDFs) into optimized, readable **PDF documents** for the reMarkable e-ink tablet, with enhanced typography, OCR capabilities, and integrated note-taking spaces.
 
 ### Problem Statement
 Scientific papers are often poorly formatted for e-ink devices:
@@ -12,18 +12,35 @@ Scientific papers are often poorly formatted for e-ink devices:
 - Scanned PDFs lack searchable text
 - No dedicated spaces for annotations
 - Manual file transfer is cumbersome
-- Fixed PDF pagination doesn't adapt to user preferences (font size changes)
+- **EPUB rendering on reMarkable is unreliable** (blank pages, missing word spaces)
 
 ### Solution
 An automated pipeline that:
 1. Use a PDF backlog or fetch papers from multiple sources
 2. If ArXiv, prefer the source LaTeX and images
-3. Extract text from PDF via OCR when needed (Deepseek-OCR)
+3. Extract text from PDF via OCR when needed (Groq Vision API)
 4. Detect images and annotate them with EXIF data
-5. Reformat content as reflowable EPUB with readable typography (OpenDyslexic font)
-6. Generate EPUB with flexible pagination (adapts to user font size preferences)
-7. Add annotation zones and metadata
+5. **Generate optimized PDF** with readable typography (OpenDyslexic font)
+6. **Pre-render at configurable font size** (12-18pt, default 14pt)
+7. Add annotation-friendly margins and metadata
 8. Push directly to reMarkable device
+
+### Why PDF Instead of EPUB (ADR-002)
+
+After extensive testing, EPUB output on reMarkable has critical issues:
+
+- **~40% blank pages** due to reMarkable's internal EPUB-to-PDF conversion
+- **Missing word spaces** from text extraction (pdfplumber limitation)
+- **Garbled TOC** entries without proper spacing
+
+PDF output advantages:
+
+- **Native support**: reMarkable renders PDFs without conversion
+- **Perfect fidelity**: What you generate is what you see
+- **No blank pages**: Direct rendering eliminates pagination bugs
+- **Preserved spacing**: Glyph-level control ensures word separation
+
+See [ADR-002: PDF Output Format](docs/ADR-002-pdf-output-format.md) for full analysis.
 
 ---
 
@@ -467,24 +484,20 @@ An automated pipeline that:
      As shown in Figure~\ref{fig:architecture}, the model uses...
      ```
 
-     **Output EPUB**:
+     **Output PDF**:
 
-     ```html
-     <figure id="fig-architecture">
-       <img src="images/architecture.png"
-            alt="Neural network architecture diagram showing 5 layers" />
-       <figcaption>Figure 1: Neural network architecture with 5 layers</figcaption>
-     </figure>
-
-     <p>As shown in <a href="#fig-architecture">Figure 1</a>, the model uses...</p>
-     ```
+     The PDF generator (reportlab) renders:
+     - Figure image embedded at appropriate position
+     - Caption text below figure: "Figure 1: Neural network architecture with 5 layers"
+     - PDF bookmark for figure navigation
+     - Cross-reference "Figure 1" linked via PDF internal links
 
      **Quality Standards**:
      - Extract 100% of figures from LaTeX source
      - Preserve caption text exactly
-     - Convert references to hyperlinks
-     - Optimize images while preserving quality
-     - Include in EPUB even if vector → raster conversion needed
+     - Convert references to PDF internal links
+     - Optimize images while preserving quality (1404×1872px max)
+     - Include all figures even if vector → raster conversion needed
 
 - **Documentation**: [docs/pdf_splitting_triage.md](docs/pdf_splitting_triage.md) (to be created)
 
@@ -643,23 +656,29 @@ An automated pipeline that:
 - **Formula Handling**: Preserve LaTeX or MathML when possible
 
 ### 4.5 Layout & Typography
+
 | Feature | Specification |
 |---------|---------------|
-| Output Format | EPUB 3.0 (reflowable, not fixed-layout) |
-| Font Family | OpenDyslexic (embedded) |
-| Font Size | User configurable on device (EPUB advantage) |
-| Default Font Size | 14-18pt recommended |
+| **Output Format** | **PDF** (optimized for reMarkable) - see [ADR-002](docs/ADR-002-pdf-output-format.md) |
+| Page Size | 1404×1872px (reMarkable 1 native resolution) |
+| Font Family | OpenDyslexic (embedded in PDF) |
+| Font Size | Configurable at conversion time (`--font-size 12/14/16/18`) |
+| Default Font Size | 14pt |
 | Line Height | 1.5x font size |
-| Column Layout | Single column, reflowable text |
-| Headings | Semantic HTML (h1, h2, h3), styled via CSS |
-| Figures/Tables | Embedded images optimized for reMarkable 1 (1404×1872px), captions below |
-| Pagination | Dynamic (reflows based on user font size) |
+| Column Layout | Single column |
+| Margins | Generous (72pt / 1 inch) for annotations |
+| Headings | Visual hierarchy via font size/weight |
+| Figures/Tables | Embedded images optimized for e-ink, captions below |
+| Pagination | Fixed (pre-rendered for perfect display) |
+
+**Note**: EPUB output still available via `--format epub` but not recommended due to reMarkable rendering issues.
 
 ### 4.6 Annotation Zones
-- **Margins**: Generous margins via CSS for reMarkable annotations
-- **Page Breaks**: Strategic breaks using CSS (avoid splitting sections)
+
+- **Margins**: Generous margins (72pt / 1 inch) for reMarkable pen annotations
+- **Page Breaks**: Strategic breaks (avoid splitting paragraphs mid-sentence)
 - **Visual Cues**: Subtle chapter separators and section breaks
-- **EPUB Advantage**: reMarkable's native annotation works seamlessly with EPUB
+- **PDF Advantage**: reMarkable's native annotation overlays work perfectly with PDF
 
 ### 4.7 reMarkable Integration
 - **Method 1**: rmapi (command-line tool)
@@ -723,7 +742,8 @@ An automated pipeline that:
 ## 6. Technical Architecture
 
 ### 6.1 System Components
-```
+
+```text
 ┌─────────────────┐
 │  Input Handler  │  (URL fetch, file upload, PDF backlog)
 └────────┬────────┘
@@ -743,13 +763,13 @@ An automated pipeline that:
          │             │
 ┌────────▼────────┐    │
 │  OCR Engine     │    │
-│ (Deepseek-OCR)  │────┤
+│ (Groq Vision)   │────┤
 └─────────────────┘    │
          │             │
          └─────┬───────┘
                │
 ┌──────────────▼──────────┐
-│  Content Processor      │  (extract text, images, structure)
+│  Text Extractor         │  (PyMuPDF - preserves word spacing)
 └──────────────┬──────────┘
                │
 ┌──────────────▼──────────┐
@@ -757,55 +777,59 @@ An automated pipeline that:
 └──────────────┬──────────┘
                │
 ┌──────────────▼──────────┐
-│  EPUB Generator         │  (HTML + CSS + embedded fonts)
+│  PDF Generator          │  (reportlab + OpenDyslexic font)
 └──────────────┬──────────┘
-              │
-┌─────────────▼──────────┐
-│  reMarkable Uploader   │  (rmapi, Cloud API)
-└────────────────────────┘
+               │
+┌──────────────▼──────────┐
+│  reMarkable Uploader    │  (rmapi, Cloud API)
+└──────────────────────────┘
 ```
 
 ### 6.2 Technology Stack
+
 | Layer | Technology | Rationale |
 |-------|------------|-----------|
-| Language | Python 3.9+ | Rich ecosystem for PDF/OCR/EPUB |
-| OCR | Deepseek-OCR via Groq API | Math notation support, fast inference |
-| PDF Input | PyMuPDF (fitz) | Fast, reliable parsing |
-| EPUB Output | ebooklib | EPUB 3.0 generation |
-| HTML/CSS | BeautifulSoup4 | Content structuring |
+| Language | Python 3.9+ | Rich ecosystem for PDF/OCR |
+| OCR | Groq Vision API (Llama 4 Scout) | Best handwriting/math support |
+| PDF Input | PyMuPDF (fitz) | Fast, reliable parsing, preserves word spacing |
+| **PDF Output** | **reportlab** | Industry-standard PDF generation, font embedding |
+| PDF Output (alt) | weasyprint | HTML-to-PDF, CSS-based styling |
+| EPUB Output | ebooklib | Legacy EPUB support (not recommended) |
+| Text Extraction | PyMuPDF (primary) | Preserves word spacing unlike pdfplumber |
 | Image Processing | Pillow | Resize/optimize for reMarkable 1 (1404×1872) |
 | Vision Models | mlx-vlm (Qwen2.5-VL, Pixtral) | Local image understanding, 30-50% faster |
 | Image Classification | pyobjc-framework-Vision (macOS) | Native Apple Vision framework, built-in |
-| Typography | OpenDyslexic (embedded) | Dyslexia-friendly, included in EPUB |
+| Typography | OpenDyslexic (embedded in PDF) | Dyslexia-friendly |
 | reMarkable Sync | rmapi | Community-proven tool |
 | CLI | Click | Modern Python CLI framework |
 | Config | python-dotenv | Environment management |
 | Testing | pytest | Standard Python testing |
 
 ### 6.3 Data Flow
+
 1. **Input**: User provides ArXiv URL, local PDF, or PDF backlog
 2. **Source Detection**:
    - ArXiv: Try to fetch LaTeX source + images
    - PDF: Check for text layer
 3. **Content Extraction**:
    - LaTeX: Parse .tex files, extract structure and images
-   - PDF with text: Use PyMuPDF to extract text
+   - PDF with text: Use **PyMuPDF** to extract text (preserves word spacing)
    - Scanned PDF: Convert pages to images (150 DPI)
 4. **OCR** (if needed):
-   - Prepare images for Deepseek-OCR processing
-   - Submit to Deepseek-OCR via Groq API
-   - Extract structured text (fast inference)
+   - Handwriting detection routes to appropriate engine
+   - Groq Vision API for handwritten/complex content
+   - Local OCR for simple printed text
 5. **Image Processing**:
    - Extract figures/diagrams from PDF or LaTeX
    - Resize to reMarkable 1 resolution (1404×1872px)
    - Optimize for e-ink (contrast, dithering)
    - Add EXIF metadata (source, page number)
-6. **EPUB Generation**:
-   - Convert text to semantic HTML (h1, h2, p, figure)
-   - Apply CSS with OpenDyslexic font
-   - Embed optimized images
-   - Create navigation (Table of Contents)
-   - Package as EPUB 3.0
+6. **PDF Generation**:
+   - Layout text with OpenDyslexic font (configurable size)
+   - Single column, generous margins (72pt)
+   - Embed optimized images inline
+   - Generate PDF bookmarks for navigation
+   - Output as optimized PDF (1404×1872px pages)
 7. **Upload**: Push to reMarkable via rmapi or Cloud API
 8. **Cleanup**: Delete temporary files (images, cache)
 

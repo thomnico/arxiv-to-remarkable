@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ArXiv to reMarkable converter - transforms scientific papers (ArXiv, IEEE, PDFs) into EPUB format optimized for reMarkable e-ink tablets with enhanced readability features (OpenDyslexic font, OCR via Groq Vision API).
+ArXiv to reMarkable converter - transforms scientific papers (ArXiv, IEEE, PDFs) into **optimized PDF format** for reMarkable e-ink tablets with enhanced readability features (OpenDyslexic font, OCR via Groq Vision API).
+
+**Important**: Output format is **PDF** (not EPUB). See [ADR-002](../docs/ADR-002-pdf-output-format.md) for rationale - EPUB rendering on reMarkable has critical issues (blank pages, missing word spaces).
 
 ## Development Commands
 
@@ -61,8 +63,9 @@ cp .env.template .env
 # Edit .env and add GROQ_API_KEY
 
 # Main CLI commands
-arxiv2rm convert <url_or_path>              # Convert paper to EPUB
-arxiv2rm convert paper.pdf -o output.epub   # Specify output
+arxiv2rm convert <url_or_path>              # Convert paper to PDF
+arxiv2rm convert paper.pdf -o output.pdf    # Specify output
+arxiv2rm convert paper.pdf --font-size 16   # Larger font (12/14/16/18)
 arxiv2rm batch papers.txt --parallel 3      # Batch processing
 arxiv2rm config --show                      # View configuration
 arxiv2rm config --init                      # Create config file
@@ -70,6 +73,9 @@ arxiv2rm config --path                      # Show config location
 
 # Handwriting detection CLI
 arxiv2rm-detect <image_path>                # Detect handwriting in image
+
+# Legacy EPUB output (not recommended)
+arxiv2rm convert paper.pdf --format epub    # Force EPUB output
 ```
 
 ## Code Architecture
@@ -157,11 +163,13 @@ Enforces:
 ## Key Dependencies
 
 ### Core Libraries
+
 - **CLI**: `click` (commands), `rich` (output), `tqdm` (progress)
 - **Config**: `pydantic` (validation), `python-dotenv` (.env), `pyyaml` (config files)
-- **PDF**: `PyMuPDF` (fitz), `pdfplumber`
+- **PDF Input**: `PyMuPDF` (fitz) - primary text extraction (preserves word spacing)
+- **PDF Output**: `reportlab` - PDF generation with font embedding
 - **Images**: `Pillow`, `piexif`
-- **EPUB**: `ebooklib`, `beautifulsoup4`, `lxml`
+- **EPUB (legacy)**: `ebooklib`, `beautifulsoup4`, `lxml`
 - **HTTP**: `requests`, `httpx`
 - **ArXiv**: `arxiv` (official Python package)
 - **LaTeX**: `TexSoup`
@@ -209,20 +217,23 @@ Optional:
 
 ## Known Limitations
 
-- **Phase 1 MVP status**: Core conversion pipeline not yet implemented
-- **CLI commands**: `convert` and `batch` currently return "not yet implemented" warnings
+- **EPUB not recommended**: EPUB output has rendering issues on reMarkable (blank pages, missing spaces)
+- **PDF output pending**: PDFBuilder using reportlab not yet implemented
+- **Font size fixed at conversion**: Unlike EPUB, PDF font size cannot be changed on device
 - **reMarkable upload**: Integration pending (rmapi or cloud API)
-- **EPUB generation**: Core EPUB builder not yet implemented
 
 ## Documentation References
 
 - [PRD.md](../PRD.md): Product Requirements Document
 - [TASKS.md](../TASKS.md): Detailed task breakdown
 - [GITHUB_ISSUES_SUMMARY.md](../GITHUB_ISSUES_SUMMARY.md): Issue roadmap
+- [docs/ADR-002-pdf-output-format.md](../docs/ADR-002-pdf-output-format.md): PDF output decision
+- [docs/ADR-001-formula-rendering.md](../docs/ADR-001-formula-rendering.md): Formula extraction as images
 - [docs/GROQ_OCR_INTEGRATION.md](../docs/GROQ_OCR_INTEGRATION.md): Groq OCR integration guide
 - [docs/automated_ocr_routing.md](../docs/automated_ocr_routing.md): Handwriting detection architecture
 
 ## reMarkable Device Specs
 
-- **reMarkable 1**: 1404×1872px (e-ink display)
-- **Optimization targets**: High contrast for e-ink, JPEG quality 85, dithering optional
+- **reMarkable 1**: 10.3" E Ink display, 1872×1404 pixels (portrait), 226 DPI
+- **Page size for PDF**: 1404×1872px (width × height in portrait mode)
+- **Optimization targets**: High contrast for e-ink, JPEG quality 85, OpenDyslexic font embedded

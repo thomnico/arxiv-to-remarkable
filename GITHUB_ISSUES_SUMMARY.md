@@ -6,6 +6,9 @@
 **Repository**: https://github.com/thomnico/arxiv-to-remarkable
 **View issues**: `gh issue list --label phase-1`
 
+> **Note**: Output format changed from EPUB to **PDF** per [ADR-002](docs/ADR-002-pdf-output-format.md).
+> EPUB had critical rendering issues on reMarkable (blank pages, missing word spaces).
+
 ## Phase 1: MVP Issues (P0)
 
 All issues created with label `P0,phase-1` for MVP scope.
@@ -25,7 +28,7 @@ All issues created with label `P0,phase-1` for MVP scope.
 | Issue | Title | Dependencies | Estimate |
 |-------|-------|--------------|----------|
 | [#4](https://github.com/thomnico/arxiv-to-remarkable/issues/4) | ArXiv API Client | #1, #2 | 3-4 days |
-| [#5](https://github.com/thomnico/arxiv-to-remarkable/issues/5) | LaTeX Source Processor | #4 | 4-5 days |
+| [#5](https://github.com/thomnico/arxiv-to-remarkable/issues/5) | LaTeX Source Processor (to PDF) | #4 | 4-5 days |
 
 **Total Epic 2**: ~1.5 weeks
 
@@ -33,7 +36,7 @@ All issues created with label `P0,phase-1` for MVP scope.
 
 | Issue | Title | Dependencies | Estimate |
 |-------|-------|--------------|----------|
-| [#6](https://github.com/thomnico/arxiv-to-remarkable/issues/6) | PDF Text Extraction | #1 | 2-3 days |
+| [#6](https://github.com/thomnico/arxiv-to-remarkable/issues/6) | PDF Text Extraction (PyMuPDF) | #1 | 2-3 days |
 | [#7](https://github.com/thomnico/arxiv-to-remarkable/issues/7) | PDF Image Extraction | #6 | 2 days |
 
 **Total Epic 3**: ~1 week
@@ -47,14 +50,14 @@ All issues created with label `P0,phase-1` for MVP scope.
 
 **Total Epic 4**: ~1 week
 
-### Epic 5: EPUB Generation (4 issues)
+### Epic 5: PDF Generation (4 issues) — *Changed from EPUB*
 
 | Issue | Title | Dependencies | Estimate |
 |-------|-------|--------------|----------|
-| [#10](https://github.com/thomnico/arxiv-to-remarkable/issues/10) | EPUB Structure Builder | #1 | 3 days |
-| [#11](https://github.com/thomnico/arxiv-to-remarkable/issues/11) | HTML Content Generation | #10 | 3-4 days |
-| [#12](https://github.com/thomnico/arxiv-to-remarkable/issues/12) | CSS Styling | #11 | 2-3 days |
-| [#13](https://github.com/thomnico/arxiv-to-remarkable/issues/13) | EPUB Assembly & Validation | #12 | 3 days |
+| [#10](https://github.com/thomnico/arxiv-to-remarkable/issues/10) | PDFBuilder with reportlab | #1 | 3 days |
+| [#11](https://github.com/thomnico/arxiv-to-remarkable/issues/11) | Text Layout & Font Embedding | #10 | 3-4 days |
+| [#12](https://github.com/thomnico/arxiv-to-remarkable/issues/12) | OpenDyslexic Font Integration | #11 | 2-3 days |
+| [#13](https://github.com/thomnico/arxiv-to-remarkable/issues/13) | PDF Assembly & Validation | #12 | 3 days |
 
 **Total Epic 5**: ~2 weeks
 
@@ -73,15 +76,15 @@ All issues created with label `P0,phase-1` for MVP scope.
   → #2 (Config)
     → #3 (CLI)
     → #4 (ArXiv Client)
-      → #5 (LaTeX Processor)
-    → #6 (PDF Extract)
+      → #5 (LaTeX to PDF)
+    → #6 (PDF Extract via PyMuPDF)
       → #7 (PDF Images)
   → #8 (Image Resize)
     → #9 (E-ink Optimize)
-  → #10 (EPUB Structure)
-    → #11 (HTML Gen)
-      → #12 (CSS)
-        → #13 (EPUB Assembly)
+  → #10 (PDFBuilder)
+    → #11 (Text Layout)
+      → #12 (OpenDyslexic Font)
+        → #13 (PDF Assembly)
           → #14 (reMarkable Upload)
 ```
 
@@ -95,11 +98,11 @@ All issues created with label `P0,phase-1` for MVP scope.
 | #2 | #3, #4 |
 | #3 | (CLI ready for integration) |
 | #4 | #5 |
-| #5 | (LaTeX processing complete) |
+| #5 | (LaTeX to PDF complete) |
 | #6 | #7 |
 | #7 | (PDF processing complete) |
 | #8 | #9 |
-| #9 | (Images ready for EPUB) |
+| #9 | (Images ready for PDF) |
 | #10 | #11 |
 | #11 | #12 |
 | #12 | #13 |
@@ -110,9 +113,9 @@ All issues created with label `P0,phase-1` for MVP scope.
 
 Can be worked on simultaneously:
 - **Epic 1** (Setup) - Week 1
-- **Epic 2** (ArXiv) + **Epic 3** (PDF) - Weeks 2-3 (parallel)
+- **Epic 2** (ArXiv) + **Epic 3** (PDF Input) - Weeks 2-3 (parallel)
 - **Epic 4** (Images) - Week 3 (parallel with Epic 3)
-- **Epic 5** (EPUB) - Weeks 4-5
+- **Epic 5** (PDF Output) - Weeks 4-5
 - **Epic 6** (Upload) - Week 6
 
 ## Next Steps
@@ -139,7 +142,7 @@ gh issue list --label phase-1 --state open
 
 # Create project board (recommended)
 gh project create --title "ArXiv to reMarkable MVP" \
-  --body "Phase 1: Core EPUB conversion pipeline"
+  --body "Phase 1: Core PDF conversion pipeline"
 ```
 
 ## Future Phases
@@ -167,11 +170,13 @@ gh project create --title "ArXiv to reMarkable MVP" \
 
 - **PRD**: See `PRD.md`
 - **Task Breakdown**: See `TASKS.md`
+- **PDF Output Decision**: See `docs/ADR-002-pdf-output-format.md`
 - **Groq OCR Reference**: See `docs/GROQ_OCR_INTEGRATION.md`
 - **CLAUDE.md**: See `.claude/CLAUDE.md`
 
 ---
 
 **Created**: 2025-11-24
+**Updated**: 2025-11-26 (PDF output per ADR-002)
 **Total Phase 1 Issues**: 14
 **Estimated Duration**: 6 weeks
