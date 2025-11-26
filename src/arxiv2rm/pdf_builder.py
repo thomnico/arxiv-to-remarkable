@@ -303,6 +303,16 @@ class PDFBuilder:
         """Add document title."""
         self.content.append(("title", title))
 
+    def add_title_page(self, title: str, author: Optional[str] = None):
+        """
+        Add a title page to the document.
+
+        Args:
+            title: Document title
+            author: Optional author name(s)
+        """
+        self.content.append(("title_page", (title, author)))
+
     def add_heading(self, text: str, level: int = 1):
         """
         Add a heading.
@@ -312,6 +322,24 @@ class PDFBuilder:
             level: Heading level (1-3)
         """
         self.content.append(("heading", (text, level)))
+
+    def add_chapter(self, title: str, content: str):
+        """
+        Add a chapter with title and content.
+
+        Args:
+            title: Chapter title
+            content: Chapter text content
+        """
+        # Add chapter heading
+        self.add_heading(title, level=1)
+        # Add content paragraphs
+        if content:
+            paragraphs = content.split("\n\n")
+            for para in paragraphs:
+                para = para.strip()
+                if para:
+                    self.add_paragraph(para)
 
     def add_paragraph(self, text: str, style: str = "Normal"):
         """
@@ -436,7 +464,30 @@ class PDFBuilder:
         content_width = self.config.page_width - self.config.margin_left - self.config.margin_right
 
         for content_type, content_data in self.content:
-            if content_type == "title":
+            if content_type == "title_page":
+                # Add a dedicated title page
+                title, author = content_data
+                # Add bookmark for title
+                bookmark_counter += 1
+                bookmark_key = f"title_{bookmark_counter}"
+                flowables.append(BookmarkFlowable(title[:50], level=0, key=bookmark_key))
+                last_outline_level = 0
+                # Add vertical space to center title
+                flowables.append(Spacer(1, 100))
+                # Title
+                p = Paragraph(title, self._styles["Title"])
+                flowables.append(p)
+                # Author if provided
+                if author:
+                    flowables.append(Spacer(1, 24))
+                    author_p = Paragraph(author, self._styles["Normal"])
+                    flowables.append(author_p)
+                # Page break after title page
+                from reportlab.platypus import PageBreak
+
+                flowables.append(PageBreak())
+
+            elif content_type == "title":
                 # Add bookmark for title
                 bookmark_counter += 1
                 bookmark_key = f"title_{bookmark_counter}"
