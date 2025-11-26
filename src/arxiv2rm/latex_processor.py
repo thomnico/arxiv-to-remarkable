@@ -205,80 +205,67 @@ class LaTeXProcessor:
 
     def _extract_content(self, soup: TexNode, doc: LaTeXDocument, current_file: Path):
         r"""
-        Extract content (sections, figures) from LaTeX tree.
+        Extract content (sections, figures, tables) from LaTeX tree.
 
-        Recursively processes \input and \include commands IN DOCUMENT ORDER.
-        This maintains proper hierarchical structure.
+        Uses raw text parsing to extract content BETWEEN sections since TexSoup
+        doesn't capture content between section commands.
         """
-        # Build a map of figures to their surrounding section by parsing the raw text
+        # Track processed input commands to avoid duplicates
+        processed_inputs: Set[int] = set()
+
+        # Get raw text for parsing
+        raw_text = str(soup)
+
+        # Find all section positions
+        section_pattern = r"\\section\{([^}]+)\}"
+        section_matches = list(re.finditer(section_pattern, raw_text))
+
+        logger.debug(f"Found {len(section_matches)} sections in {current_file.name}")
+
+        # Extract content between sections
+        for i, match in enumerate(section_matches):
+            title = match.group(1)
+            # Clean title
+            title = self._node_to_text(TexSoup(title))
+
+            # Find content start (after section header)
+            content_start = match.end()
+
+            # Find content end (before next section or end of document/file)
+            if i + 1 < len(section_matches):
+                content_end = section_matches[i + 1].start()
+            else:
+                # Last section - go until \end{document} or end of file
+                end_doc_match = re.search(r"\\end\{document\}", raw_text[content_start:])
+                if end_doc_match:
+                    content_end = content_start + end_doc_match.start()
+                else:
+                    content_end = len(raw_text)
+
+            # Extract raw content
+            raw_content = raw_text[content_start:content_end]
+
+            # Clean and convert to text
+            content = self._clean_latex_content(raw_content)
+
+            # Extract figure/table references from content
+            figure_refs, table_refs = self._extract_references_from_content(raw_content)
+
+            section = Section(
+                level=1,
+                title=title,
+                content=content,
+                figure_refs=figure_refs,
+                table_refs=table_refs,
+            )
+            doc.sections.append(section)
+            logger.debug(f"Extracted section: {title[:30]}... ({len(content)} chars)")
+
+        # Extract tables from raw text
+        self._extract_tables_from_raw(raw_text, doc, current_file)
+
+        # Build figure section map and extract figures
         figures_section_map = self._map_figures_to_sections(soup, current_file)
-
-        # Build a map of input commands to their preceding sections
-        # This is critical for associating input file content with the right section
-        input_section_map = self._map_inputs_to_sections(soup, current_file)
-
-        # Process document in order to maintain section hierarchy
-        # Strategy: Process sections one by one, and immediately process their \input files
-        processed_inputs = set()
-
-        # Extract level 1 sections in order
-        for section_node in soup.find_all("section"):
-            try:
-                title = self._node_to_text(section_node.args[0])
-                content = self._extract_section_content(section_node)
-                # Extract figure/table references from content
-                figure_refs, table_refs = self._extract_references_from_content(content)
-                section = Section(
-                    level=1,
-                    title=title,
-                    content=content,
-                    figure_refs=figure_refs,
-                    table_refs=table_refs,
-                )
-                doc.sections.append(section)
-                logger.debug(f"Extracted section: {title[:30]}...")
-
-                # Immediately process input files that belong to this section
-                for input_cmd in soup.find_all("input"):
-                    if id(input_cmd) in processed_inputs:
-                        continue
-
-                    input_file = self._resolve_input_file(input_cmd, current_file)
-                    if input_file and input_file.exists():
-                        input_name = input_file.stem
-                        mapped_section = input_section_map.get(input_name)
-
-                        if mapped_section == title:
-                            processed_inputs.add(id(input_cmd))
-                            doc.included_files.append(input_file)
-                            logger.debug(f"Processing \\input: {input_file} for section {title}")
-
-                            # Parse and process the input file
-                            input_soup = self._parse_file(input_file)
-
-                            # Check if contains sections
-                            has_sections = any(
-                                input_soup.find_all(tag) for tag in ["subsection", "subsubsection"]
-                            )
-
-                            if has_sections:
-                                # Extract subsections and add immediately after parent section
-                                self._extract_subsections(input_soup, doc, input_file)
-                            else:
-                                # Plain content - add to current section
-                                clean_content = self._node_to_text(input_soup)
-                                if clean_content.strip():
-                                    section.content += "\n\n" + clean_content
-                                    # Re-extract references after adding content
-                                    fig_refs, tab_refs = self._extract_references_from_content(
-                                        section.content
-                                    )
-                                    section.figure_refs = fig_refs
-                                    section.table_refs = tab_refs
-                                    logger.debug(f"Added {len(clean_content)} chars to {title}")
-
-            except Exception as e:
-                logger.warning(f"Failed to extract section: {e}")
 
         # Extract figures with section context from map
         for figure_node in soup.find_all("figure"):
@@ -349,6 +336,149 @@ class LaTeXProcessor:
                             )
             except Exception as e:
                 logger.warning(f"Failed to process \\include: {e}")
+
+    def _clean_latex_content(self, raw_content: str) -> str:
+        """
+        Clean raw LaTeX content to readable text.
+
+        Removes environments, commands, and formats text for reading.
+        """
+        content = raw_content
+
+        # Remove figure environments entirely (they're extracted separately)
+        content = re.sub(r"\\begin\{figure\}.*?\\end\{figure\}", "", content, flags=re.DOTALL)
+
+        # Remove table environments entirely (they're extracted separately)
+        content = re.sub(r"\\begin\{table\}.*?\\end\{table\}", "", content, flags=re.DOTALL)
+
+        # Remove algorithm environments
+        content = re.sub(r"\\begin\{algorithm\}.*?\\end\{algorithm\}", "", content, flags=re.DOTALL)
+
+        # Handle subsection/subsubsection - keep as markers
+        content = re.sub(r"\\subsection\{([^}]+)\}", r"\n\n### \1\n\n", content)
+        content = re.sub(r"\\subsubsection\{([^}]+)\}", r"\n\n#### \1\n\n", content)
+
+        # Handle paragraph commands
+        content = re.sub(r"\\paragraph\{([^}]+)\}", r"\n\n**\1** ", content)
+
+        # Handle itemize/enumerate environments
+        content = re.sub(r"\\begin\{itemize\}(\[.*?\])?", "", content)
+        content = re.sub(r"\\end\{itemize\}", "", content)
+        content = re.sub(r"\\begin\{enumerate\}(\[.*?\])?", "", content)
+        content = re.sub(r"\\end\{enumerate\}", "", content)
+        content = re.sub(r"\\item(\[.*?\])?", "• ", content)
+
+        # Handle text formatting
+        content = re.sub(r"\\textbf\{([^}]+)\}", r"\1", content)
+        content = re.sub(r"\\textit\{([^}]+)\}", r"\1", content)
+        content = re.sub(r"\\emph\{([^}]+)\}", r"\1", content)
+        content = re.sub(r"\\underline\{([^}]+)\}", r"\1", content)
+        content = re.sub(r"\\url\{([^}]+)\}", r"\1", content)
+
+        # Handle citations - replace with [citation]
+        content = re.sub(r"\\cite[a-z]*\{[^}]+\}", "[citation]", content)
+
+        # Handle footnotes - remove or simplify
+        content = re.sub(r"\\footnote\{[^}]+\}", "", content)
+
+        # Remove labels
+        content = re.sub(r"\\label\{[^}]+\}", "", content)
+
+        # Preserve references with markers
+        content = re.sub(r"\\ref\{([^}]+)\}", r"<<<REF:\1>>>", content)
+        content = re.sub(r"\\cref\{([^}]+)\}", r"<<<REF:\1>>>", content)
+
+        # Handle math - simplify inline math
+        content = re.sub(r"\$([^$]+)\$", r"[\1]", content)
+
+        # Remove display math environments but keep a placeholder
+        content = re.sub(
+            r"\\begin\{equation\*?\}.*?\\end\{equation\*?\}",
+            "[equation]",
+            content,
+            flags=re.DOTALL,
+        )
+        content = re.sub(
+            r"\\begin\{align\*?\}.*?\\end\{align\*?\}",
+            "[equation]",
+            content,
+            flags=re.DOTALL,
+        )
+        content = re.sub(r"\\\[.*?\\\]", "[equation]", content, flags=re.DOTALL)
+
+        # Remove other common commands
+        content = re.sub(r"\\vspace\{[^}]+\}", "", content)
+        content = re.sub(r"\\hspace\{[^}]+\}", "", content)
+        content = re.sub(r"\\newline", "\n", content)
+        content = re.sub(r"\\\\", "\n", content)
+        content = re.sub(r"\\noindent", "", content)
+        content = re.sub(r"\\centering", "", content)
+
+        # Handle special characters
+        content = re.sub(r"~", " ", content)  # Non-breaking space
+        content = re.sub(r"\\&", "&", content)
+        content = re.sub(r"\\%", "%", content)
+        content = re.sub(r"\\_", "_", content)
+        content = re.sub(r"\\#", "#", content)
+        content = re.sub(r"\\ldots", "...", content)
+        content = re.sub(r"\\dots", "...", content)
+
+        # Remove any remaining LaTeX commands (but keep their content if in braces)
+        content = re.sub(r"\\[a-zA-Z]+\*?\{([^}]*)\}", r"\1", content)
+        content = re.sub(r"\\[a-zA-Z]+\*?", "", content)
+
+        # Clean up braces
+        content = re.sub(r"[\{\}]", "", content)
+
+        # Clean up whitespace
+        content = re.sub(r"\n\s*\n\s*\n+", "\n\n", content)
+        content = re.sub(r"[ \t]+", " ", content)
+
+        return content.strip()
+
+    def _extract_tables_from_raw(self, raw_text: str, doc: LaTeXDocument, current_file: Path):
+        """
+        Extract tables from raw LaTeX text.
+
+        Uses regex to find table environments and extract their content.
+        """
+        # Find all table environments
+        table_pattern = r"\\begin\{table\}(.*?)\\end\{table\}"
+        table_matches = list(re.finditer(table_pattern, raw_text, flags=re.DOTALL))
+
+        logger.debug(f"Found {len(table_matches)} tables in {current_file.name}")
+
+        for match in table_matches:
+            table_content = match.group(1)
+
+            self.table_counter += 1
+            table = Table(
+                number=self.table_counter,
+                source_file=current_file,
+            )
+
+            # Extract caption
+            caption_match = re.search(r"\\caption\{([^}]+)\}", table_content)
+            if caption_match:
+                table.caption = self._node_to_text(TexSoup(caption_match.group(1)))
+
+            # Extract label
+            label_match = re.search(r"\\label\{([^}]+)\}", table_content)
+            if label_match:
+                table.label = label_match.group(1)
+
+            # Extract tabular content
+            tabular_match = re.search(
+                r"\\begin\{tabular\}(\{[^}]+\})?(.*?)\\end\{tabular\}",
+                table_content,
+                flags=re.DOTALL,
+            )
+            if tabular_match:
+                table.content = tabular_match.group(0)
+
+            if table.content or table.caption:
+                doc.tables.append(table)
+                logger.debug(f"Extracted table {table.number}: {table.label or 'no label'}")
 
     def _extract_subsections(self, soup: TexNode, doc: LaTeXDocument, current_file: Path):
         """
