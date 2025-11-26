@@ -1,14 +1,15 @@
 """
-PDF to EPUB Converter for reMarkable.
+PDF Converter for reMarkable.
 
 Main conversion pipeline that orchestrates:
 1. PDF analysis and text extraction
 2. Column detection and text reordering
 3. Image extraction and optimization
-4. EPUB generation with proper structure
+4. PDF generation optimized for reMarkable e-ink display
 """
 
 import logging
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass, field
@@ -16,8 +17,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .column_detector import ColumnAwareExtractor
-from .epub_builder import EPUBBuilder, TextToHTMLConverter
 from .image_optimizer import ImageOptimizer, OptimizationSettings, RemarkableDevice
+from .pdf_builder import PDFBuilder, PDFBuilderConfig, PDFMetadata
 from .pdf_parser import PDFParser
 
 logger = logging.getLogger(__name__)
@@ -25,17 +26,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ConversionResult:
-    """Result of PDF to EPUB conversion."""
+    """Result of PDF conversion."""
 
     success: bool
-    epub_path: Optional[Path] = None
+    output_path: Optional[Path] = None
     error: Optional[str] = None
     stats: Dict = field(default_factory=dict)
 
 
 @dataclass
 class ConversionOptions:
-    """Options for PDF to EPUB conversion."""
+    """Options for PDF conversion."""
 
     # Output settings
     output_path: Optional[Path] = None
@@ -51,22 +52,22 @@ class ConversionOptions:
     detect_columns: bool = True
     ocr_engine: str = "local"  # "local", "groq", or "tesseract"
 
-    # EPUB settings
+    # PDF settings
     include_title_page: bool = True
-    include_toc: bool = True
+    font_size: int = 14  # 12, 14, 16, or 18
 
     # Processing settings
     temp_dir: Optional[Path] = None
     keep_temp: bool = False
 
 
-class PDFToEPUBConverter:
+class PDFConverter:
     """
-    Converts PDF documents to EPUB format optimized for reMarkable.
+    Converts PDF documents to reMarkable-optimized PDF format.
 
     Usage:
-        converter = PDFToEPUBConverter()
-        result = converter.convert("paper.pdf", "paper.epub")
+        converter = PDFConverter()
+        result = converter.convert("paper.pdf", "paper_remarkable.pdf")
     """
 
     def __init__(self, options: Optional[ConversionOptions] = None):
@@ -87,7 +88,6 @@ class PDFToEPUBConverter:
                 quality=self.options.image_quality,
             )
         )
-        self.text_converter = TextToHTMLConverter()
         self.column_extractor = ColumnAwareExtractor()
 
     def convert(
@@ -97,11 +97,11 @@ class PDFToEPUBConverter:
         options: Optional[ConversionOptions] = None,
     ) -> ConversionResult:
         """
-        Convert a PDF to EPUB.
+        Convert a PDF to reMarkable-optimized PDF.
 
         Args:
             input_path: Path to input PDF file
-            output_path: Path for output EPUB (optional)
+            output_path: Path for output PDF (optional)
             options: Override options for this conversion
 
         Returns:
@@ -120,7 +120,7 @@ class PDFToEPUBConverter:
         if output_path is None:
             output_path = options.output_path
         if output_path is None:
-            output_path = input_path.with_suffix(".epub")
+            output_path = input_path.with_name(f"{input_path.stem}_remarkable.pdf")
         output_path = Path(output_path)
 
         logger.info(f"Converting: {input_path} -> {output_path}")
@@ -138,7 +138,6 @@ class PDFToEPUBConverter:
 
             # Step 2: Analyze and extract from PDF (with formula exclusions)
             logger.info("Step 2: Analyzing and extracting PDF...")
-            # Pass formula regions to exclude their text from extraction
             pdf_result = self.pdf_parser.parse(
                 input_path,
                 temp_dir,
@@ -170,15 +169,15 @@ class PDFToEPUBConverter:
             )
             stats["optimized_images"] = len(optimized_images)
 
-            # Step 4: Extract text content with inline figures and formulas
+            # Step 4: Extract text content
             logger.info("Step 4: Creating chapters...")
             pages = pdf_result.get("pages", [])
             chapters = self._create_chapters(pages, optimized_images, formula_images)
             stats["chapters"] = len(chapters)
 
-            # Step 5: Build EPUB
-            logger.info("Step 5: Building EPUB...")
-            epub_path = self._build_epub(
+            # Step 5: Build PDF
+            logger.info("Step 5: Building PDF...")
+            pdf_path = self._build_pdf(
                 chapters,
                 optimized_images,
                 formula_images,
@@ -188,17 +187,17 @@ class PDFToEPUBConverter:
             )
 
             # Calculate output stats
-            stats["output_size_kb"] = epub_path.stat().st_size / 1024
+            stats["output_size_kb"] = pdf_path.stat().st_size / 1024
             stats["input_size_kb"] = input_path.stat().st_size / 1024
 
             logger.info(
-                f"Conversion complete: {stats['output_size_kb']:.1f}KB EPUB "
+                f"Conversion complete: {stats['output_size_kb']:.1f}KB PDF "
                 f"from {stats['input_size_kb']:.1f}KB PDF"
             )
 
             return ConversionResult(
                 success=True,
-                epub_path=epub_path,
+                output_path=pdf_path,
                 stats=stats,
             )
 
@@ -247,11 +246,10 @@ class PDFToEPUBConverter:
 
             page_num = img_info.get("page_num", 0)
             img_idx = img_info.get("image_index", 0)
-            figure_num = img_info.get("figure_num")  # May be None for embedded images
+            figure_num = img_info.get("figure_num")
             img_type = img_info.get("type", "embedded")
 
             try:
-                # Optimize image
                 output_path = output_dir / f"img_p{page_num}_{img_idx}.jpg"
                 optimized = self.image_optimizer.optimize(img_path, output_path)
 
@@ -276,64 +274,20 @@ class PDFToEPUBConverter:
         formula_images: Optional[List[Dict]] = None,
     ) -> List[Dict]:
         """
-        Create chapter structure from extracted pages with inline figures and formulas.
-
-        Figures are inserted at their first mention in the text (e.g., "Figure 1", "Fig. 2").
-        Matrix formulas are inserted at their page positions.
+        Create chapter structure from extracted pages.
 
         Args:
             pages: List of page dicts with text content
-            optimized_images: List of image dicts with path, figure_num, page_num, type
-            formula_images: List of formula image dicts with page, bbox, img_path
+            optimized_images: List of image dicts
+            formula_images: List of formula image dicts
 
         Returns:
-            List of chapter dicts with title and HTML content
+            List of chapter dicts with title and content
         """
         if not pages:
-            return [{"title": "Content", "content": "<p>No content available.</p>"}]
-
-        # Build figure lookup by figure_num for matching to text references
-        # Also assign sequential numbers to figures without detected numbers
-        figures_by_num: Dict[int, Dict] = {}
-        next_unknown_num = 100  # High number for unmatched figures
-
-        for img in optimized_images:
-            fig_num = img.get("figure_num")
-            if fig_num is not None:
-                # Use detected figure number
-                if fig_num not in figures_by_num:
-                    figures_by_num[fig_num] = {
-                        "img_path": img["path"],
-                        "figure_num": fig_num,
-                        "page_num": img["page_num"],
-                        "inserted": False,
-                    }
-            else:
-                # Assign a high number for figures without detected numbers
-                figures_by_num[next_unknown_num] = {
-                    "img_path": img["path"],
-                    "figure_num": next_unknown_num,
-                    "page_num": img["page_num"],
-                    "inserted": False,
-                    "is_unmatched": True,
-                }
-                next_unknown_num += 1
-
-        # Convert to list sorted by figure number
-        all_figures = [figures_by_num[k] for k in sorted(figures_by_num.keys())]
-
-        # Build formula lookup by page (for chapter detection only)
-        formulas_by_page: Dict[int, List[Dict]] = {}
-        if formula_images:
-            for formula in formula_images:
-                page_num = formula.get("page", 0)
-                if page_num not in formulas_by_page:
-                    formulas_by_page[page_num] = []
-                formulas_by_page[page_num].append(formula)
+            return [{"title": "Content", "content": "No content available."}]
 
         # Combine all text from pages
-        # NOTE: Formula placeholders are already inserted during text extraction
-        # (in pdf_parser.py) so we don't need to add them here
         text_parts = []
         for page in pages:
             page_text = page.get("text", "")
@@ -341,405 +295,17 @@ class PDFToEPUBConverter:
 
         all_text = "\n\n".join(text_parts)
 
-        # First, try to detect chapter structure
-        detected_chapters = self._detect_chapters_with_figures(
-            all_text, all_figures, pages, formulas_by_page
-        )
+        # Detect chapter structure
+        chapters = self._detect_chapters(all_text)
 
-        if not detected_chapters:
-            # No clear chapter structure - create single chapter
-            # NOTE: Formula placeholders in text will be converted to HTML
-            # by _insert_figures_at_mentions via the formula_pattern regex
-            html_content = self._insert_figures_at_mentions(all_text, all_figures)
-            html_content += '\n<div class="notes-zone"></div>'
-            return [{"title": "Content", "content": html_content}]
-        else:
-            # Add notes zone to each chapter
-            for chapter in detected_chapters:
-                chapter["content"] += '\n<div class="notes-zone"></div>'
-            return detected_chapters
-
-    def _generate_formula_html(self, formulas: List[Dict]) -> str:
-        """Generate HTML for formula images."""
-        if not formulas:
-            return ""
-
-        html_parts = []
-        for formula in formulas:
-            img_path = formula.get("img_path")
-            if img_path:
-                img_name = Path(img_path).name
-                page_num = formula.get("page", 0) + 1
-                html_parts.append(
-                    f"""
-<figure class="formula-figure">
-    <img src="images/{img_name}" alt="Formula from page {page_num}" class="formula-img"/>
-</figure>
-"""
-                )
-        return "\n".join(html_parts)
-
-    def _insert_figures_at_mentions(
-        self,
-        text: str,
-        figures: List[Dict],
-        append_remaining: bool = False,
-    ) -> str:
-        """
-        Convert text to HTML and insert figures at their first mention.
-
-        Args:
-            text: Plain text content
-            figures: List of figure dicts with img_path, figure_num, inserted flag
-            append_remaining: If True, append remaining figures at end (last chapter only)
-
-        Returns:
-            HTML content with figures inserted at first mention
-        """
-        import re
-
-        # Convert text to HTML first
-        html = self.text_converter.convert(text)
-
-        # Convert formula placeholders to actual HTML
-        # Pattern: [FORMULA_IMAGE:filename.png:pageN]
-        formula_pattern = re.compile(r"\[FORMULA_IMAGE:([^:]+):page(\d+)\]")
-
-        def formula_replacement(match):
-            img_name = match.group(1)
-            page_num = match.group(2)
-            return f"""
-<figure class="formula-figure">
-    <img src="images/{img_name}" alt="Formula from page {page_num}" class="formula-img"/>
-</figure>
-"""
-
-        html = formula_pattern.sub(formula_replacement, html)
-
-        # Build lookup from figure number to figure dict
-        figures_by_num: Dict[int, Dict] = {}
-        for fig in figures:
-            fig_num = fig.get("figure_num")
-            if fig_num is not None and fig_num not in figures_by_num:
-                figures_by_num[fig_num] = fig
-
-        # Pattern to find figure references
-        # Matches: "Figure 1", "Fig. 1", "Figure 2a", "Figures 1-3", etc.
-        fig_pattern = re.compile(
-            r"(Fig(?:ure|\.)\s*(\d+)(?:[a-z])?(?:\s*[-–]\s*\d+)?)", re.IGNORECASE
-        )
-
-        # Track which figures have been inserted in THIS chapter
-        inserted_fig_nums = set()
-
-        # Find all figure mentions and their positions
-        mentions = []
-        for match in fig_pattern.finditer(html):
-            fig_num = int(match.group(2))
-            mentions.append(
-                {
-                    "match": match,
-                    "fig_num": fig_num,
-                    "end_pos": match.end(),
-                }
-            )
-
-        # Sort mentions by position (process from end to avoid offset issues)
-        mentions.sort(key=lambda x: x["end_pos"], reverse=True)
-
-        # Insert figures at first mention (working backwards through the text)
-        for mention in mentions:
-            fig_num = mention["fig_num"]
-
-            # Skip if already inserted in this chapter or no matching figure
-            if fig_num in inserted_fig_nums or fig_num not in figures_by_num:
-                continue
-
-            fig = figures_by_num[fig_num]
-            if fig.get("inserted"):
-                continue
-
-            # Find the end of the paragraph containing this mention
-            end_pos = mention["end_pos"]
-
-            # Look for </p> after the mention
-            para_end = html.find("</p>", end_pos)
-            if para_end == -1:
-                para_end = end_pos
-            else:
-                para_end += 4  # Include </p>
-
-            # Create figure HTML
-            img_ref = f"images/{fig['img_path'].name}"
-            caption = f"Figure {fig_num}"
-            figure_html = f"""
-<figure class="inline-figure">
-    <img src="{img_ref}" alt="{caption}"/>
-    <figcaption>{caption}</figcaption>
-</figure>
-"""
-            # Insert figure after the paragraph
-            html = html[:para_end] + figure_html + html[para_end:]
-
-            # Mark as inserted (globally)
-            inserted_fig_nums.add(fig_num)
-            fig["inserted"] = True
-
-        # Only append remaining figures if this is the last chapter
-        if append_remaining:
-            remaining_html = ""
-            for fig in figures:
-                if not fig.get("inserted"):
-                    img_ref = f"images/{fig['img_path'].name}"
-                    fig_num = fig.get("figure_num", "?")
-                    # Don't show high numbers for unmatched figures
-                    if fig.get("is_unmatched"):
-                        caption = "Figure"
-                    else:
-                        caption = f"Figure {fig_num}"
-                    remaining_html += f"""
-<figure class="inline-figure">
-    <img src="{img_ref}" alt="{caption}"/>
-    <figcaption>{caption}</figcaption>
-</figure>
-"""
-                    fig["inserted"] = True
-            html += remaining_html
-
-        return html
-
-    def _detect_chapters_with_figures(
-        self,
-        text: str,
-        figures: List[Dict],
-        pages: List[Dict],
-        formulas_by_page: Optional[Dict[int, List[Dict]]] = None,
-    ) -> List[Dict]:
-        """
-        Detect chapters and insert figures/formulas at their positions.
-
-        Args:
-            text: Full document text
-            figures: List of figure dicts
-            pages: List of page dicts
-            formulas_by_page: Dict mapping page number to formula dicts
-
-        Returns:
-            List of chapter dicts with title and content (figures at first mention)
-        """
-        formulas_by_page = formulas_by_page or {}
-        # Split text into lines
-        lines = text.split("\n")
-        chapters = []
-
-        # First pass: collect all chapter boundaries
-        chapter_boundaries = []  # List of (title, start_line_idx)
-        pre_chapter_end = None
-
-        for i, line in enumerate(lines):
-            line_stripped = line.strip()
-
-            if not line_stripped:
-                continue
-
-            # Check if this line is a section/subsection heading
-            heading_level = self._detect_heading_level(line_stripped)
-
-            # Only create new chapters for major sections (level 1-2)
-            if heading_level > 0 and heading_level <= 2:
-                if pre_chapter_end is None:
-                    pre_chapter_end = i
-                chapter_boundaries.append((line_stripped, i))
-
-        # Second pass: create chapters with proper figure placement
-        if not chapter_boundaries:
-            return []  # No chapters detected
-
-        # Handle pre-chapter content
-        if pre_chapter_end and pre_chapter_end > 0:
-            pre_text = "\n".join(lines[:pre_chapter_end])
-            if pre_text.strip():
-                html_content = self._insert_figures_at_mentions(
-                    pre_text, figures, append_remaining=False
-                )
-                chapters.append({"title": "Introduction", "content": html_content})
-
-        # Process each chapter
-        for idx, (title, start_idx) in enumerate(chapter_boundaries):
-            # Find end of this chapter (start of next chapter or end of text)
-            if idx + 1 < len(chapter_boundaries):
-                end_idx = chapter_boundaries[idx + 1][1]
-            else:
-                end_idx = len(lines)
-
-            # Get chapter content (skip the title line itself)
-            chapter_lines = lines[start_idx + 1 : end_idx]
-            content_text = "\n".join(chapter_lines)
-
-            # Only append remaining figures in the LAST chapter
-            is_last_chapter = idx == len(chapter_boundaries) - 1
-            html_content = self._insert_figures_at_mentions(
-                content_text, figures, append_remaining=is_last_chapter
-            )
-
-            chapters.append({"title": title, "content": html_content})
+        if not chapters:
+            return [{"title": "Content", "content": all_text}]
 
         return chapters
-
-    def _detect_heading_level(self, text: str) -> int:
-        """
-        Detect if text is a section heading and return its level.
-
-        Returns:
-            0 if not a heading, 1 for major sections, 2 for subsections, 3 for subsubsections
-        """
-        import re
-
-        text = text.strip()
-
-        # Must be reasonably short to be a heading
-        if len(text) > 80:
-            return 0
-
-        # Must not end with common sentence punctuation (list items often end with comma/period)
-        if text.endswith((",", ";", ":", "?", "!")):
-            return 0
-
-        # If ends with period, only accept if it's section number period (e.g., "1. Intro")
-        # Not a sentence ending (e.g., "1. Read these documents.")
-        if text.endswith("."):
-            # Only allow if pattern is "N. Title" and title is short (2-4 words)
-            if not re.match(r"^\d+\.\s+[A-Z][a-z]+(?:\s+[A-Za-z]+){0,3}$", text):
-                return 0
-
-        # Subsubsection: "4.1.1 Title" or "4.1.1. Title"
-        if re.match(r"^\d+\.\d+\.\d+\.?\s+[A-Z][A-Za-z]", text):
-            words = text.split()
-            if len(words) <= 10:
-                return 3
-
-        # Subsection: "2.1 Title" or "2.1. Title"
-        if re.match(r"^\d+\.\d+\.?\s+[A-Z][A-Za-z]", text):
-            words = text.split()
-            if len(words) <= 10:
-                return 2
-
-        # Pattern for numbered sections: "1. Introduction", "2 Background", etc.
-        # Major section: single digit, e.g., "1 Title" (no period after number)
-        # or "1. Title" where title is clearly a section name
-        if re.match(r"^\d+\.?\s+[A-Z][A-Za-z]", text):
-            words = text.split()
-            # Must be title-like: 2-6 words, first word after number is capitalized
-            # and NOT a typical sentence start like verbs
-            if 2 <= len(words) <= 6:
-                # Get the title part (after the number)
-                title_part = " ".join(words[1:]).lower()
-                # Exclude if looks like a numbered list/instruction (starts with verb)
-                verb_starts = [
-                    "read",
-                    "write",
-                    "use",
-                    "create",
-                    "make",
-                    "do",
-                    "see",
-                    "summarize",
-                    "interpret",
-                    "analyze",
-                    "check",
-                    "verify",
-                    "note",
-                    "ensure",
-                    "consider",
-                    "apply",
-                    "acknowledge",
-                ]
-                if not any(title_part.startswith(v) for v in verb_starts):
-                    # Also exclude garbled text (very long "words" indicate missing spaces)
-                    first_title_word = words[1] if len(words) > 1 else ""
-                    if len(first_title_word) <= 20:  # Normal words are < 20 chars
-                        return 1
-
-        # Standalone section names (without numbers)
-        standalone_sections = [
-            "abstract",
-            "introduction",
-            "background",
-            "related work",
-            "methods",
-            "method",
-            "methodology",
-            "materials and methods",
-            "results",
-            "result",
-            "findings",
-            "discussion",
-            "conclusions",
-            "conclusion",
-            "references",
-            "bibliography",
-            "acknowledgments",
-            "acknowledgements",
-            "acknowledgment",
-            "appendix",
-            "supplementary",
-            "supplemental",
-            "limitations",
-            "future work",
-            "future directions",
-        ]
-        text_lower = text.lower()
-        if text_lower in standalone_sections:
-            return 1
-
-        # Sections with colon-separated subtitles (e.g., "Discussion: Some Subtitle")
-        # These are major sections when they start with a known section keyword
-        for section_kw in [
-            "discussion",
-            "conclusion",
-            "results",
-            "method",
-            "introduction",
-            "background",
-            "conceptual",
-        ]:
-            if text_lower.startswith(section_kw + ":") or text_lower.startswith(
-                section_kw + " flow"
-            ):
-                return 1
-
-        # Appendix sections: "Appendix A", "Appendix B. Tables", etc.
-        if re.match(r"^appendix\s+[a-z]\.?\s*", text, re.IGNORECASE):
-            return 1
-
-        # Title Case headings that are short (3-6 words) and end without punctuation
-        # This catches things like "Discussion: From Individual Incident to Structural Pathology"
-        # Must be strict: pre-colon must be a known section keyword
-        if ":" in text:
-            title_words = text.split()
-            if 3 <= len(title_words) <= 10:
-                pre_colon = text.split(":")[0].strip().lower()
-                # Only match if pre-colon is a known section name
-                known_pre_colon = [
-                    "discussion",
-                    "conclusion",
-                    "results",
-                    "methods",
-                    "introduction",
-                    "background",
-                    "conceptual flow",
-                ]
-                if pre_colon in known_pre_colon:
-                    return 1
-
-        return 0
 
     def _detect_chapters(self, text: str) -> List[Dict]:
         """
         Detect chapter/section structure from text.
-
-        Only detects major sections (single digit numbering like "1 Introduction")
-        to avoid splitting on subsections like "2.2 Details".
 
         Args:
             text: Full document text
@@ -747,40 +313,6 @@ class PDFToEPUBConverter:
         Returns:
             List of chapter dicts with title and content
         """
-        import re
-
-        # Major section patterns only (not subsections like 2.1, 2.2)
-        # Must be specific academic section names to avoid false positives
-        section_patterns = [
-            r"^Abstract$",
-            r"^(\d+)\.\s*Introduction$",
-            r"^(\d+)\.\s*Background$",
-            r"^(\d+)\.\s*Related\s+Work$",
-            r"^(\d+)\.\s*Methods?$",
-            r"^(\d+)\.\s*Methodology$",
-            r"^(\d+)\.\s*Results?$",
-            r"^(\d+)\.\s*Discussion$",
-            r"^(\d+)\.\s*Conclusions?$",
-            r"^(\d+)\.\s*References?$",
-            r"^(\d+)\.\s*Acknowledgm?ents?$",
-            r"^(\d+)\.\s*Limitations?$",
-            r"^(\d+)\.\s*Future\s+Work$",
-            # Also match without period: "1 Introduction"
-            r"^(\d+)\s+Introduction$",
-            r"^(\d+)\s+Background$",
-            r"^(\d+)\s+Related\s+Work$",
-            r"^(\d+)\s+Methods?$",
-            r"^(\d+)\s+Methodology$",
-            r"^(\d+)\s+Results?$",
-            r"^(\d+)\s+Discussion$",
-            r"^(\d+)\s+Conclusions?$",
-            r"^(\d+)\s+References?$",
-            r"^(\d+)\s+Acknowledgm?ents?$",
-            r"^(\d+)\s+Limitations?$",
-            r"^(\d+)\s+Future\s+Work$",
-        ]
-
-        # Split text into lines for processing
         lines = text.split("\n")
         chapters = []
         current_title = None
@@ -789,29 +321,17 @@ class PDFToEPUBConverter:
         for line in lines:
             line_stripped = line.strip()
 
-            # Skip empty lines for heading detection
             if not line_stripped:
                 current_content.append(line)
                 continue
 
-            # Headings must be short (< 60 chars) and NOT subsections
-            is_heading = False
-            if len(line_stripped) < 60:
-                # Skip subsections like "2.1 Title"
-                if re.match(r"^\d+\.\d+", line_stripped):
-                    is_heading = False
-                else:
-                    for pattern in section_patterns:
-                        if re.match(pattern, line_stripped, re.IGNORECASE):
-                            is_heading = True
-                            break
+            heading_level = self._detect_heading_level(line_stripped)
 
-            if is_heading:
+            if heading_level > 0 and heading_level <= 2:
                 # Save previous chapter
                 if current_title:
                     content = "\n".join(current_content)
-                    html_content = self.text_converter.convert(content)
-                    chapters.append({"title": current_title, "content": html_content})
+                    chapters.append({"title": current_title, "content": content})
 
                 # Start new chapter
                 current_title = line_stripped
@@ -822,12 +342,63 @@ class PDFToEPUBConverter:
         # Save last chapter
         if current_title:
             content = "\n".join(current_content)
-            html_content = self.text_converter.convert(content)
-            chapters.append({"title": current_title, "content": html_content})
+            chapters.append({"title": current_title, "content": content})
+        elif current_content:
+            # No chapters detected, use all content
+            content = "\n".join(current_content)
+            chapters.append({"title": "Content", "content": content})
 
         return chapters
 
-    def _build_epub(
+    def _detect_heading_level(self, text: str) -> int:
+        """
+        Detect if text is a section heading and return its level.
+
+        Returns:
+            0 if not a heading, 1 for major sections, 2 for subsections
+        """
+        text = text.strip()
+
+        if len(text) > 80:
+            return 0
+
+        if text.endswith((",", ";", ":", "?", "!")):
+            return 0
+
+        # Numbered sections
+        if re.match(r"^\d+\.\d+\.\d+\.?\s+[A-Z]", text):
+            return 3
+        if re.match(r"^\d+\.\d+\.?\s+[A-Z]", text):
+            return 2
+        if re.match(r"^\d+\.?\s+[A-Z][A-Za-z]", text):
+            words = text.split()
+            if 2 <= len(words) <= 6:
+                return 1
+
+        # Standalone section names
+        standalone_sections = [
+            "abstract",
+            "introduction",
+            "background",
+            "related work",
+            "methods",
+            "method",
+            "methodology",
+            "materials and methods",
+            "results",
+            "discussion",
+            "conclusions",
+            "conclusion",
+            "references",
+            "acknowledgments",
+            "acknowledgements",
+        ]
+        if text.lower() in standalone_sections:
+            return 1
+
+        return 0
+
+    def _build_pdf(
         self,
         chapters: List[Dict],
         optimized_images: List[Dict],
@@ -837,68 +408,62 @@ class PDFToEPUBConverter:
         input_path: Path,
     ) -> Path:
         """
-        Build the EPUB file.
+        Build the PDF file.
 
         Args:
             chapters: List of chapter dicts
-            optimized_images: List of image dicts with path, figure_num, page_num
-            formula_images: List of formula image dicts with page, bbox, img_path
-            output_path: Output path for EPUB
+            optimized_images: List of image dicts
+            formula_images: List of formula image dicts
+            output_path: Output path for PDF
             options: Conversion options
             input_path: Original input PDF path
 
         Returns:
-            Path to created EPUB file
+            Path to created PDF file
         """
-        builder = EPUBBuilder()
+        # Configure PDF builder
+        config = PDFBuilderConfig(font_size=options.font_size)
 
         # Set metadata
         title = options.title or input_path.stem.replace("_", " ").replace("-", " ").title()
         authors = options.authors or []
 
-        builder.set_metadata(
+        metadata = PDFMetadata(
             title=title,
-            authors=authors,
-            language="en",
-            source_url=str(input_path),
+            author=", ".join(authors) if authors else "",
         )
 
-        # Set cover image from first image (if available)
-        if optimized_images:
-            # Sort by page number to get first page's image
-            sorted_images = sorted(
-                optimized_images, key=lambda x: (x.get("page_num", 0), x.get("index", 0))
-            )
-            if sorted_images:
-                cover_path = sorted_images[0]["path"]
-                builder.set_cover_image(cover_path)
+        builder = PDFBuilder(config=config, metadata=metadata)
 
-        # Add title page
+        # Add title page if requested
         if options.include_title_page:
-            builder.add_title_page()
-
-        # Add all images to EPUB manifest
-        for img in optimized_images:
-            builder.add_image(img["path"])
-
-        # Add formula images to EPUB manifest
-        for formula in formula_images:
-            img_path = formula.get("img_path")
-            if img_path:
-                builder.add_image(img_path)
+            builder.add_title_page(title, ", ".join(authors) if authors else None)
 
         # Add chapters
         for chapter in chapters:
-            builder.add_chapter(
-                title=chapter["title"],
-                content=chapter["content"],
-            )
+            builder.add_chapter(chapter["title"], chapter["content"])
 
-        # Build EPUB
+        # Add images
+        for img in optimized_images:
+            try:
+                builder.add_image(img["path"])
+            except Exception as e:
+                logger.warning(f"Failed to add image: {e}")
+
+        # Add formula images
+        for formula in formula_images:
+            img_path = formula.get("img_path")
+            if img_path:
+                try:
+                    builder.add_image(img_path)
+                except Exception as e:
+                    logger.warning(f"Failed to add formula image: {e}")
+
+        # Build PDF
         return builder.build(output_path)
 
 
-def convert_pdf_to_epub(
+def convert_pdf(
     input_path: Path,
     output_path: Optional[Path] = None,
     title: Optional[str] = None,
@@ -907,11 +472,11 @@ def convert_pdf_to_epub(
     detect_columns: bool = True,
 ) -> ConversionResult:
     """
-    Convenience function to convert a PDF to EPUB.
+    Convenience function to convert a PDF to reMarkable-optimized PDF.
 
     Args:
         input_path: Path to input PDF
-        output_path: Path for output EPUB (optional)
+        output_path: Path for output PDF (optional)
         title: Document title (optional)
         authors: List of authors (optional)
         optimize_images: Whether to optimize images for e-ink
@@ -928,7 +493,7 @@ def convert_pdf_to_epub(
         detect_columns=detect_columns,
     )
 
-    converter = PDFToEPUBConverter(options)
+    converter = PDFConverter(options)
     return converter.convert(input_path, output_path)
 
 
@@ -942,12 +507,12 @@ if __name__ == "__main__":
         input_path = Path(sys.argv[1])
         output_path = Path(sys.argv[2]) if len(sys.argv) > 2 else None
 
-        result = convert_pdf_to_epub(input_path, output_path)
+        result = convert_pdf(input_path, output_path)
 
         if result.success:
-            print(f"Conversion successful: {result.epub_path}")
+            print(f"Conversion successful: {result.output_path}")
             print(f"Stats: {result.stats}")
         else:
             print(f"Conversion failed: {result.error}")
     else:
-        print("Usage: python converter.py <input.pdf> [output.epub]")
+        print("Usage: python converter.py <input.pdf> [output.pdf]")

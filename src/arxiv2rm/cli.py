@@ -85,7 +85,7 @@ def generate_output_filename(
     if arxiv_id:
         base_name = f"{base_name}-{arxiv_id}"
 
-    return pdf_path.parent / f"{base_name}.epub"
+    return pdf_path.parent / f"{base_name}_remarkable.pdf"
 
 
 def setup_logging(level: str = "INFO") -> None:
@@ -118,7 +118,7 @@ def setup_logging(level: str = "INFO") -> None:
 def main(ctx, config_file, log_level):
     """ArXiv to reMarkable converter.
 
-    Convert scientific papers to EPUB format optimized for reMarkable devices.
+    Convert scientific papers to PDF format optimized for reMarkable devices.
     """
     ctx.ensure_object(dict)
 
@@ -145,7 +145,7 @@ def main(ctx, config_file, log_level):
 @main.command()
 @click.argument("url_or_path")
 @click.option("--output", "-o", help="Output file path")
-@click.option("--format", "output_format", default="epub", help="Output format (epub)")
+@click.option("--format", "output_format", default="pdf", help="Output format (pdf)")
 @click.option("--ocr-engine", default="local", help="OCR engine (local, groq, tesseract)")
 @click.option("--image-quality", type=int, default=85, help="JPEG quality (1-100)")
 @click.option("--title", help="Override document title")
@@ -167,16 +167,16 @@ def convert(
     remarkable_folder,
     upload,
 ):
-    """Convert a paper to EPUB format.
+    """Convert a paper to PDF format optimized for reMarkable.
 
     \b
     Examples:
         arxiv2rm convert paper.pdf
-        arxiv2rm convert paper.pdf --output custom.epub
+        arxiv2rm convert paper.pdf --output custom.pdf
         arxiv2rm convert paper.pdf --title "My Paper" --author "John Doe"
         arxiv2rm convert paper.pdf --no-columns  # Disable column detection
     """
-    from arxiv2rm.converter import ConversionOptions, PDFToEPUBConverter
+    from arxiv2rm.converter import ConversionOptions, PDFConverter
     from arxiv2rm.image_optimizer import RemarkableDevice
 
     config = ctx.obj.get("config")
@@ -248,10 +248,10 @@ def convert(
     )
 
     # Run conversion
-    converter = PDFToEPUBConverter(options)
+    converter = PDFConverter(options)
 
     with Progress(console=console, transient=True) as progress:
-        task = progress.add_task("[cyan]Converting PDF to EPUB...", total=100)
+        task = progress.add_task("[cyan]Converting PDF for reMarkable...", total=100)
 
         # Step 1: Analysis
         progress.update(task, description="[cyan]Analyzing PDF...", advance=10)
@@ -260,7 +260,7 @@ def convert(
 
     if result.success:
         console.print("\n[bold green]Conversion successful![/bold green]")
-        console.print(f"[green]Output:[/green] {result.epub_path}")
+        console.print(f"[green]Output:[/green] {result.output_path}")
 
         # Show stats
         stats = result.stats
@@ -572,6 +572,227 @@ def analyze(ctx, pdf_path, columns, output, preview):
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
         console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+
+
+@main.command()
+@click.argument("source_pdf", type=click.Path(exists=True))
+@click.argument("output_pdf", type=click.Path(exists=True))
+@click.option("--pages", "-p", help="Specific pages to evaluate (e.g., '1,3,5')")
+@click.option("--max-pages", default=5, help="Maximum pages to evaluate (default: 5)")
+@click.option("--output", "-o", type=click.Path(), help="Save evaluation to JSON file")
+@click.option("--verbose", "-v", is_flag=True, help="Show detailed evaluation results")
+@click.pass_context
+def evaluate(ctx, source_pdf, output_pdf, pages, max_pages, output, verbose):
+    """Evaluate PDF conversion quality using Claude Vision.
+
+    Compares source PDF with converted output to assess:
+    - Formatting quality and human readability
+    - Mathematical formula accuracy
+    - Table structure preservation
+
+    Requires ANTHROPIC_API_KEY environment variable for Claude Vision API.
+
+    \b
+    Examples:
+        arxiv2rm evaluate original.pdf converted.pdf
+        arxiv2rm evaluate original.pdf converted.pdf --pages 1,5,10
+        arxiv2rm evaluate original.pdf converted.pdf --output eval.json
+        arxiv2rm evaluate original.pdf converted.pdf --verbose
+    """
+    import json
+    import os
+
+    from arxiv2rm.readability_evaluator import QualityLevel, ReadabilityEvaluator
+
+    logger = logging.getLogger(__name__)
+    source_path = Path(source_pdf)
+    output_path = Path(output_pdf)
+
+    # Check for API key
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        console.print(
+            "[yellow]Warning:[/yellow] ANTHROPIC_API_KEY not set. "
+            "Using fallback evaluation (limited accuracy)."
+        )
+
+    console.print("[bold blue]Evaluating Conversion Quality[/bold blue]")
+    console.print(f"  Source: {source_path.name}")
+    console.print(f"  Output: {output_path.name}")
+    console.print()
+
+    # Parse page numbers if specified
+    sample_pages = None
+    if pages:
+        try:
+            sample_pages = [int(p.strip()) for p in pages.split(",")]
+            console.print(f"[dim]Evaluating pages: {sample_pages}[/dim]")
+        except ValueError:
+            console.print("[red]Invalid page numbers. Use comma-separated integers.[/red]")
+            sys.exit(1)
+
+    try:
+        evaluator = ReadabilityEvaluator(api_key=api_key)
+
+        with Progress(console=console) as progress:
+            task = progress.add_task("[cyan]Evaluating conversion...", total=100)
+
+            # Run evaluation
+            progress.update(task, description="[cyan]Analyzing pages...")
+            result = evaluator.evaluate(
+                source_path,
+                output_path,
+                sample_pages=sample_pages,
+                max_pages=max_pages,
+            )
+            progress.update(task, advance=100)
+
+        # Display results
+        console.print("\n[bold green]Evaluation Complete[/bold green]\n")
+
+        # Quality badge
+        quality_colors = {
+            QualityLevel.EXCELLENT: "green",
+            QualityLevel.GOOD: "blue",
+            QualityLevel.ACCEPTABLE: "yellow",
+            QualityLevel.POOR: "red",
+            QualityLevel.UNACCEPTABLE: "red bold",
+        }
+        quality_color = quality_colors.get(result.quality_level, "white")
+
+        console.print(
+            f"[bold]Overall Quality:[/bold] "
+            f"[{quality_color}]{result.quality_level.value.upper()}[/{quality_color}] "
+            f"({result.overall_score:.1f}%)"
+        )
+        console.print()
+
+        # Scores table
+        scores_table = Table(title="Quality Scores")
+        scores_table.add_column("Category", style="cyan")
+        scores_table.add_column("Score", style="white")
+        scores_table.add_column("Status", style="white")
+
+        def score_status(score):
+            if score >= 80:
+                return "[green]✓ Good[/green]"
+            elif score >= 60:
+                return "[yellow]○ Acceptable[/yellow]"
+            else:
+                return "[red]✗ Needs work[/red]"
+
+        scores_table.add_row(
+            "Formatting",
+            f"{result.formatting_score:.1f}%",
+            score_status(result.formatting_score),
+        )
+        scores_table.add_row(
+            "Readability",
+            f"{result.readability_score:.1f}%",
+            score_status(result.readability_score),
+        )
+        scores_table.add_row(
+            "Math Accuracy",
+            f"{result.math_accuracy_score:.1f}%",
+            score_status(result.math_accuracy_score),
+        )
+        scores_table.add_row(
+            "Table Accuracy",
+            f"{result.table_accuracy_score:.1f}%",
+            score_status(result.table_accuracy_score),
+        )
+
+        console.print(scores_table)
+
+        # Issues summary
+        if result.issues:
+            console.print()
+            critical_count = len([i for i in result.issues if i.severity == "critical"])
+            major_count = len([i for i in result.issues if i.severity == "major"])
+            minor_count = len([i for i in result.issues if i.severity == "minor"])
+
+            console.print("[bold]Issues Found:[/bold]")
+            if critical_count:
+                console.print(f"  [red]Critical: {critical_count}[/red]")
+            if major_count:
+                console.print(f"  [yellow]Major: {major_count}[/yellow]")
+            if minor_count:
+                console.print(f"  [dim]Minor: {minor_count}[/dim]")
+
+            # Show detailed issues if verbose
+            if verbose and result.issues:
+                console.print()
+                issues_table = Table(title="Detected Issues")
+                issues_table.add_column("Page", style="cyan", width=6)
+                issues_table.add_column("Category", style="white", width=10)
+                issues_table.add_column("Severity", style="white", width=10)
+                issues_table.add_column("Description", style="white")
+
+                for issue in result.issues[:20]:  # Limit to first 20
+                    severity_style = {
+                        "critical": "[red]critical[/red]",
+                        "major": "[yellow]major[/yellow]",
+                        "minor": "[dim]minor[/dim]",
+                    }.get(issue.severity, issue.severity)
+
+                    issues_table.add_row(
+                        str(issue.page_number) if issue.page_number else "-",
+                        issue.category,
+                        severity_style,
+                        issue.description[:60] + ("..." if len(issue.description) > 60 else ""),
+                    )
+
+                console.print(issues_table)
+
+                if len(result.issues) > 20:
+                    console.print(f"[dim]... and {len(result.issues) - 20} more issues[/dim]")
+
+        # Recommendations
+        if result.recommendations:
+            console.print()
+            console.print("[bold cyan]Recommendations:[/bold cyan]")
+            for rec in result.recommendations:
+                console.print(f"  • {rec}")
+
+        # Save to JSON if requested
+        if output:
+            output_file = Path(output)
+            eval_dict = result.to_dict()
+            eval_dict["page_evaluations"] = [
+                {
+                    "page": pe.page_number,
+                    "formatting": pe.formatting_score,
+                    "readability": pe.readability_score,
+                    "math": pe.math_score,
+                    "table": pe.table_score,
+                }
+                for pe in result.page_evaluations
+            ]
+            eval_dict["issues"] = [
+                {
+                    "category": i.category,
+                    "severity": i.severity,
+                    "description": i.description,
+                    "page": i.page_number,
+                }
+                for i in result.issues
+            ]
+
+            with open(output_file, "w") as f:
+                json.dump(eval_dict, f, indent=2)
+            console.print(f"\n[green]Evaluation saved to:[/green] {output_file}")
+
+    except FileNotFoundError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Evaluation failed: {e}")
+        console.print(f"[red]Error:[/red] {e}")
+        if verbose:
+            import traceback
+
+            console.print(f"[dim]{traceback.format_exc()}[/dim]")
         sys.exit(1)
 
 
