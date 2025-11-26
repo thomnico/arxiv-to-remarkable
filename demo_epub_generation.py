@@ -93,6 +93,38 @@ def demo_epub_generation(paper_id: str = "1706.03762", output_dir: Path = None):
         print("   ℹ️  No images found in LaTeX source")
     print()
 
+    # Step 3.5: Render tables as images
+    print("📊 Step 3.5: Rendering tables as images...")
+    rendered_tables = []
+    if latex_doc.tables:
+        from arxiv2rm.table_renderer import TableRenderer
+
+        table_renderer = TableRenderer()
+        tables_dir = output_dir / "tables"
+        tables_dir.mkdir(exist_ok=True)
+
+        for table in latex_doc.tables:
+            try:
+                output_path = tables_dir / f"table_{table.number}.png"
+                result = table_renderer.render(table, output_path, dpi=150)
+                if result:
+                    rendered_tables.append(result)
+                    table.image_path = result  # Update table with image path
+                    size_kb = result.stat().st_size // 1024
+                    print(
+                        f"   ✓ Rendered Table {table.number} → "
+                        f"table_{table.number}.png ({size_kb}KB)"
+                    )
+                else:
+                    print(f"   ⚠️  Failed to render Table {table.number}")
+            except Exception as e:
+                print(f"   ⚠️  Skipped Table {table.number}: {e}")
+
+        print(f"   ✓ Total: {len(rendered_tables)}/{len(latex_doc.tables)} tables rendered")
+    else:
+        print("   ℹ️  No tables found in LaTeX source")
+    print()
+
     # Step 4: Build EPUB
     print("📚 Step 4: Building EPUB...")
     epub_metadata = EPUBMetadata(
@@ -159,6 +191,11 @@ def demo_epub_generation(paper_id: str = "1706.03762", output_dir: Path = None):
     for img_path in optimized_images:
         builder.add_image(img_path, img_path.name)
     print(f"   ✓ Embedded {len(optimized_images)} images")
+
+    # Add rendered table images
+    for table_path in rendered_tables:
+        builder.add_image(table_path, table_path.name)
+    print(f"   ✓ Embedded {len(rendered_tables)} table images")
 
     # Write EPUB
     builder.write()
