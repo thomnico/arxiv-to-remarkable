@@ -690,7 +690,27 @@ See [ADR-002: PDF Output Format](docs/ADR-002-pdf-output-format.md) for full ana
 - **Folder Organization**: Auto-create folders by topic/date
 - **Metadata**: Preserve title, authors, publication date
 
-### 4.8 User Interface
+### 4.8 Virtual Printer Mode (Phase 2)
+
+A virtual printer that receives PDFs and automatically converts + uploads to reMarkable:
+
+- **Print-to-reMarkable**: Install as a virtual printer on macOS
+- **Workflow**:
+  1. User prints any document to "reMarkable Printer"
+  2. System receives PDF via CUPS/IPP
+  3. Automatically converts with OpenDyslexic font + e-ink optimization
+  4. Uploads to reMarkable device via rmapi
+- **Use Cases**:
+  - Print web articles directly to reMarkable
+  - Send PDFs from any application
+  - Quick capture without manual CLI interaction
+- **Technical Requirements**:
+  - CUPS virtual printer driver (macOS)
+  - Background daemon to watch print queue
+  - Configurable default settings (font size, folder)
+- **CLI Alternative**: `arxiv2rm print <file.pdf>` for one-off prints
+
+### 4.9 User Interface
 - **CLI (Phase 1)**: Command-line interface for power users
   ```bash
   arxiv2rm convert https://arxiv.org/abs/2301.12345
