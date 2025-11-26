@@ -74,8 +74,6 @@ arxiv2rm config --path                      # Show config location
 # Handwriting detection CLI
 arxiv2rm-detect <image_path>                # Detect handwriting in image
 
-# Legacy EPUB output (not recommended)
-arxiv2rm convert paper.pdf --format epub    # Force EPUB output
 ```
 
 ## Code Architecture
@@ -148,7 +146,7 @@ The Click CLI uses `@click.pass_context` to share configuration across commands:
 ### Type Hints
 - **mypy configured** but not strict (`disallow_untyped_defs=false`)
 - Type checking enabled for untyped defs
-- Missing imports ignored for: `arxiv`, `ebooklib`, `TexSoup`, `piexif`
+- Missing imports ignored for: `arxiv`, `TexSoup`, `piexif`
 
 ### Pre-commit Hooks
 Enforces:
@@ -168,8 +166,8 @@ Enforces:
 - **Config**: `pydantic` (validation), `python-dotenv` (.env), `pyyaml` (config files)
 - **PDF Input**: `PyMuPDF` (fitz) - primary text extraction (preserves word spacing)
 - **PDF Output**: `reportlab` - PDF generation with font embedding
+- **HTML Processing**: `beautifulsoup4`, `lxml`
 - **Images**: `Pillow`, `piexif`
-- **EPUB (legacy)**: `ebooklib`, `beautifulsoup4`, `lxml`
 - **HTTP**: `requests`, `httpx`
 - **ArXiv**: `arxiv` (official Python package)
 - **LaTeX**: `TexSoup`
@@ -217,9 +215,7 @@ Optional:
 
 ## Known Limitations
 
-- **EPUB not recommended**: EPUB output has rendering issues on reMarkable (blank pages, missing spaces)
-- **PDF output pending**: PDFBuilder using reportlab not yet implemented
-- **Font size fixed at conversion**: Unlike EPUB, PDF font size cannot be changed on device
+- **Font size fixed at conversion**: PDF font size cannot be changed on device after conversion
 - **reMarkable upload**: Integration pending (rmapi or cloud API)
 
 ## Documentation References
