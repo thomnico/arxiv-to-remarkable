@@ -2,4 +2,4 @@
 
 __version__ = "0.1.0"
 __author__ = "Nicolas Thomas"
-__description__ = "Convert scientific papers to reMarkable-optimized EPUB format"
+__description__ = "Convert scientific papers to reMarkable-optimized PDF format"

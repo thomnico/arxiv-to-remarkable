@@ -2,11 +2,11 @@
 # Copy this file to ~/.arxiv2rm/config.yaml and customize
 
 output:
-  format: "epub"  # EPUB 3.0 for reflowable content
+  format: "pdf"  # PDF optimized for reMarkable e-ink display
   directory: "~/Downloads/arxiv2rm"  # Output directory
 
 typography:
-  font_family: "OpenDyslexic"  # Embedded in EPUB
+  font_family: "OpenDyslexic"  # Embedded in PDF
   default_font_size: 16  # Recommendation (user adjustable on device)
   line_height: 1.5
 

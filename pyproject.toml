@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "arxiv2rm"
 version = "0.1.0"
-description = "Convert scientific papers to reMarkable-optimized EPUB format"
+description = "Convert scientific papers to reMarkable-optimized PDF format"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
     {name = "Nicolas Thomas", email = "nicolas@example.com"}
 ]
-keywords = ["arxiv", "remarkable", "epub", "pdf", "ocr", "ebook"]
+keywords = ["arxiv", "remarkable", "pdf", "ocr", "ebook"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -46,12 +46,11 @@ dependencies = [
     "opencv-python>=4.8.0",
     "numpy>=1.24.0",
 
-    # EPUB Generation (legacy)
-    "ebooklib>=0.18",
+    # HTML Processing (for PDF generation)
     "beautifulsoup4>=4.12.0",
     "lxml>=4.9.0",
 
-    # PDF Generation (primary output format)
+    # PDF Generation
     "reportlab>=4.0.0",
 
     # HTTP Requests
@@ -82,6 +81,10 @@ ocr = [
     "groq>=0.36.0",
     "opencv-python>=4.12.0",
     "scipy>=1.16.0",
+]
+
+eval = [
+    "anthropic>=0.39.0",  # Claude Vision API for quality evaluation
 ]
 
 [project.scripts]
@@ -173,7 +176,6 @@ strict_equality = true
 [[tool.mypy.overrides]]
 module = [
     "arxiv.*",
-    "ebooklib.*",
     "TexSoup.*",
     "piexif.*",
 ]

@@ -80,7 +80,7 @@ class PDFConfig(BaseModel):
 class OutputConfig(BaseModel):
     """Output configuration."""
 
-    format: str = Field(default="epub", pattern="^epub$")
+    format: str = Field(default="pdf", pattern="^pdf$")
     directory: str = "~/Downloads/arxiv2rm"
 
 

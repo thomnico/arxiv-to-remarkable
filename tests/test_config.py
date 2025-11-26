@@ -31,7 +31,7 @@ def temp_env_file():
 def test_default_config():
     """Test default configuration."""
     config = Config()
-    assert config.output.format == "epub"
+    assert config.output.format == "pdf"
     assert config.typography.font_family == "OpenDyslexic"
     assert config.images.max_width == 1404
     assert config.images.max_height == 1872
@@ -73,7 +73,7 @@ def test_config_loader_defaults(temp_config_dir, monkeypatch):
     loader = ConfigLoader(config_path=config_path)
 
     config = loader.load()
-    assert config.output.format == "epub"
+    assert config.output.format == "pdf"
     assert config.typography.default_font_size == 16
 
 
