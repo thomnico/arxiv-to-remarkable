@@ -19,12 +19,13 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from PIL import Image
+from reportlab.lib import colors
 from reportlab.lib.colors import lightgrey
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Image as RLImage
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from reportlab.platypus.flowables import Flowable
 
 logger = logging.getLogger(__name__)
@@ -280,6 +281,18 @@ class PDFBuilder:
             leftIndent=10,
         )
 
+        # Reference style - smaller font with hanging indent for numbered references
+        styles["Reference"] = ParagraphStyle(
+            name="Reference",
+            fontName=base_font,
+            fontSize=font_size - 3,  # Smaller than body text
+            leading=(font_size - 3) * 1.3,
+            spaceBefore=2,
+            spaceAfter=4,
+            leftIndent=20,  # Hanging indent
+            firstLineIndent=-20,  # Pull first line back for number
+        )
+
         return styles
 
     def set_metadata(
@@ -398,6 +411,37 @@ class PDFBuilder:
         text = self._clean_text(text)
         if text.strip():
             self.content.append(("footnote", text))
+
+    def add_reference(self, text: str, number: Optional[int] = None):
+        """
+        Add a reference entry with smaller font and optional number.
+
+        Args:
+            text: Reference text
+            number: Optional reference number (prepended as [N])
+        """
+        text = self._clean_text(text)
+        if text.strip():
+            if number is not None:
+                text = f"[{number}] {text}"
+            self.content.append(("reference", text))
+
+    def add_table(
+        self,
+        data: List[List[str]],
+        caption: Optional[str] = None,
+        header_row: bool = True,
+    ):
+        """
+        Add a table to the document.
+
+        Args:
+            data: 2D list of cell contents (rows x columns)
+            caption: Optional table caption
+            header_row: If True, style first row as header
+        """
+        if data:
+            self.content.append(("table", (data, caption, header_row)))
 
     def _clean_text(self, text: str) -> str:
         """
@@ -552,7 +596,91 @@ class PDFBuilder:
                 p = Paragraph(content_data, self._styles["Footnote"])
                 flowables.append(p)
 
+            elif content_type == "reference":
+                # Reference entry with smaller font
+                p = Paragraph(content_data, self._styles["Reference"])
+                flowables.append(p)
+
+            elif content_type == "table":
+                data, caption, header_row = content_data
+                table_flowable = self._create_table_flowable(data, content_width, header_row)
+                if table_flowable:
+                    flowables.append(Spacer(1, 6))
+                    flowables.append(table_flowable)
+                    if caption:
+                        cap = Paragraph(caption, self._styles["Caption"])
+                        flowables.append(cap)
+                    flowables.append(Spacer(1, 6))
+
         return flowables
+
+    def _create_table_flowable(
+        self,
+        data: List[List[str]],
+        content_width: float,
+        header_row: bool = True,
+    ) -> Optional[Table]:
+        """
+        Create a reportlab Table flowable.
+
+        Args:
+            data: 2D list of cell contents
+            content_width: Available content width
+            header_row: Style first row as header
+
+        Returns:
+            Table flowable or None if data is empty
+        """
+        if not data or not data[0]:
+            return None
+
+        try:
+            # Clean cell contents
+            cleaned_data = []
+            for row in data:
+                cleaned_row = [self._clean_text(str(cell) if cell else "") for cell in row]
+                cleaned_data.append(cleaned_row)
+
+            # Calculate column widths (distribute evenly with max width constraint)
+            num_cols = len(cleaned_data[0])
+            col_width = min(content_width / num_cols, 100)  # Max 100pt per column
+            col_widths = [col_width] * num_cols
+
+            # Create table
+            table = Table(cleaned_data, colWidths=col_widths)
+
+            # Define table style
+            style_commands = [
+                # Grid
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                # Padding
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                # Font
+                ("FONTNAME", (0, 0), (-1, -1), self._styles["Normal"].fontName),
+                ("FONTSIZE", (0, 0), (-1, -1), self.config.font_size - 2),
+                # Alignment
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]
+
+            # Header row styling
+            if header_row and len(cleaned_data) > 1:
+                base_font = "OpenDyslexic" if self.config.use_opendyslexic else "Helvetica"
+                style_commands.extend(
+                    [
+                        ("FONTNAME", (0, 0), (-1, 0), f"{base_font}-Bold"),
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                    ]
+                )
+
+            table.setStyle(TableStyle(style_commands))
+            return table
+
+        except Exception as e:
+            logger.warning(f"Failed to create table flowable: {e}")
+            return None
 
     def _create_image_flowable(
         self,

@@ -136,8 +136,15 @@ class PDFConverter:
             if formula_images:
                 logger.info(f"Extracted {len(formula_images)} matrix formulas")
 
-            # Step 2: Analyze and extract from PDF (with formula exclusions)
-            logger.info("Step 2: Analyzing and extracting PDF...")
+            # Step 2: Extract metadata (title, authors, arxiv_id)
+            logger.info("Step 2: Extracting metadata...")
+            metadata = self.pdf_parser.extract_metadata(input_path)
+            extracted_title = metadata.get("title")
+            extracted_authors = metadata.get("authors", [])
+            logger.info(f"Extracted title: {extracted_title}, authors: {extracted_authors}")
+
+            # Step 3: Analyze and extract from PDF (with formula exclusions)
+            logger.info("Step 3: Analyzing and extracting PDF...")
             pdf_result = self.pdf_parser.parse(
                 input_path,
                 temp_dir,
@@ -161,22 +168,22 @@ class PDFConverter:
                 f"Formula images: {stats['formula_images']}"
             )
 
-            # Step 3: Extract and optimize images
-            logger.info("Step 3: Optimizing images...")
+            # Step 4: Extract and optimize images
+            logger.info("Step 4: Optimizing images...")
             optimized_images = self._optimize_images(
                 pdf_result.get("images", []),
                 temp_dir / "optimized_images",
             )
             stats["optimized_images"] = len(optimized_images)
 
-            # Step 4: Extract text content
-            logger.info("Step 4: Creating chapters...")
+            # Step 5: Create chapters
+            logger.info("Step 5: Creating chapters...")
             pages = pdf_result.get("pages", [])
             chapters = self._create_chapters(pages, optimized_images, formula_images)
             stats["chapters"] = len(chapters)
 
-            # Step 5: Build PDF
-            logger.info("Step 5: Building PDF...")
+            # Step 6: Build PDF
+            logger.info("Step 6: Building PDF...")
             pdf_path = self._build_pdf(
                 chapters,
                 optimized_images,
@@ -184,6 +191,8 @@ class PDFConverter:
                 output_path,
                 options,
                 input_path,
+                extracted_title=extracted_title,
+                extracted_authors=extracted_authors,
             )
 
             # Calculate output stats
@@ -282,16 +291,21 @@ class PDFConverter:
             formula_images: List of formula image dicts
 
         Returns:
-            List of chapter dicts with title and content
+            List of chapter dicts with title, content, and tables
         """
         if not pages:
-            return [{"title": "Content", "content": "No content available."}]
+            return [{"title": "Content", "content": "No content available.", "tables": []}]
 
         # Combine all text from pages
         text_parts = []
+        all_tables = []
         for page in pages:
             page_text = page.get("text", "")
             text_parts.append(page_text)
+            # Collect tables from this page
+            page_tables = page.get("tables", [])
+            for table in page_tables:
+                all_tables.append({"page": page.get("page_num", 0), "data": table})
 
         all_text = "\n\n".join(text_parts)
 
@@ -299,7 +313,15 @@ class PDFConverter:
         chapters = self._detect_chapters(all_text)
 
         if not chapters:
-            return [{"title": "Content", "content": all_text}]
+            return [{"title": "Content", "content": all_text, "tables": all_tables}]
+
+        # Distribute tables to chapters (simplified: add all to first chapter)
+        # TODO: Better table-to-chapter mapping based on page numbers
+        if chapters and all_tables:
+            chapters[0]["tables"] = all_tables
+        for ch in chapters:
+            if "tables" not in ch:
+                ch["tables"] = []
 
         return chapters
 
@@ -406,6 +428,8 @@ class PDFConverter:
         output_path: Path,
         options: ConversionOptions,
         input_path: Path,
+        extracted_title: Optional[str] = None,
+        extracted_authors: Optional[List[str]] = None,
     ) -> Path:
         """
         Build the PDF file.
@@ -417,6 +441,8 @@ class PDFConverter:
             output_path: Output path for PDF
             options: Conversion options
             input_path: Original input PDF path
+            extracted_title: Title extracted from PDF metadata
+            extracted_authors: Authors extracted from PDF metadata
 
         Returns:
             Path to created PDF file
@@ -424,9 +450,13 @@ class PDFConverter:
         # Configure PDF builder
         config = PDFBuilderConfig(font_size=options.font_size)
 
-        # Set metadata
-        title = options.title or input_path.stem.replace("_", " ").replace("-", " ").title()
-        authors = options.authors or []
+        # Use extracted metadata, fall back to options, then filename
+        title = (
+            options.title
+            or extracted_title
+            or input_path.stem.replace("_", " ").replace("-", " ").title()
+        )
+        authors = options.authors or extracted_authors or []
 
         metadata = PDFMetadata(
             title=title,
@@ -439,25 +469,121 @@ class PDFConverter:
         if options.include_title_page:
             builder.add_title_page(title, ", ".join(authors) if authors else None)
 
-        # Add chapters
-        for chapter in chapters:
-            builder.add_chapter(chapter["title"], chapter["content"])
-
-        # Add images
+        # Build image lookup by figure number for inline placement
+        images_by_figure: Dict[int, Dict] = {}
+        images_without_figure: List[Dict] = []
         for img in optimized_images:
-            try:
-                builder.add_image(img["path"])
-            except Exception as e:
-                logger.warning(f"Failed to add image: {e}")
+            figure_num = img.get("figure_num")
+            if figure_num is not None:
+                images_by_figure[figure_num] = img
+            else:
+                images_without_figure.append(img)
 
-        # Add formula images
-        for formula in formula_images:
-            img_path = formula.get("img_path")
-            if img_path:
+        # Track which figures have been inserted
+        inserted_figures: set = set()
+
+        # Pattern to detect figure references like "Figure 1", "Fig. 2", "Figure 3a"
+        figure_ref_pattern = re.compile(r"\b(?:Figure|Fig\.?)\s*(\d+)", re.IGNORECASE)
+
+        # Add chapters with inline images at first mention
+        for chapter in chapters:
+            chapter_title = chapter.get("title", "")
+            is_references = chapter_title.lower() in [
+                "references",
+                "bibliography",
+                "works cited",
+            ]
+
+            # Add chapter heading
+            builder.add_heading(chapter_title, level=1)
+
+            # Add content paragraph by paragraph
+            content = chapter.get("content", "")
+            paragraphs = content.split("\n\n")
+
+            # For references section, number each entry
+            ref_number = 1
+
+            for para in paragraphs:
+                para = para.strip()
+                if not para:
+                    continue
+
+                # Check for formula placeholders in the text
+                if "[FORMULA_IMAGE:" in para:
+                    placeholder_match = re.search(r"\[FORMULA_IMAGE:([^:]+):page(\d+)\]", para)
+                    if placeholder_match:
+                        img_name = placeholder_match.group(1)
+                        for formula in formula_images:
+                            if Path(formula.get("img_path", "")).name == img_name:
+                                try:
+                                    builder.add_image(formula["img_path"])
+                                except Exception as e:
+                                    logger.warning(f"Failed to add formula image: {e}")
+                                break
+                        para = re.sub(r"\[FORMULA_IMAGE:[^\]]+\]", "", para).strip()
+                        if not para:
+                            continue
+
+                # Handle references section with smaller font and numbers
+                if is_references:
+                    # Check if this looks like a reference entry
+                    # (starts with [N], N., or is a paragraph in references)
+                    if re.match(r"^\[\d+\]", para) or re.match(r"^\d+\.", para):
+                        # Already numbered, use Reference style
+                        builder.add_reference(para)
+                    else:
+                        # Add number and use Reference style
+                        builder.add_reference(para, number=ref_number)
+                        ref_number += 1
+                    continue
+
+                # Add paragraph
+                builder.add_paragraph(para)
+
+                # Check for figure references and insert image at first mention
+                figure_matches = figure_ref_pattern.findall(para)
+                for fig_num_str in figure_matches:
+                    fig_num = int(fig_num_str)
+                    if fig_num not in inserted_figures and fig_num in images_by_figure:
+                        img = images_by_figure[fig_num]
+                        try:
+                            builder.add_image(img["path"], caption=f"Figure {fig_num}")
+                            inserted_figures.add(fig_num)
+                            logger.debug(f"Inserted Figure {fig_num} inline")
+                        except Exception as e:
+                            logger.warning(f"Failed to add Figure {fig_num}: {e}")
+
+                # Check for table references and insert table at first mention
+                table_ref_pattern = re.compile(r"\b(?:Table)\s*(\d+)", re.IGNORECASE)
+                table_matches = table_ref_pattern.findall(para)
+                for table_num_str in table_matches:
+                    table_num = int(table_num_str)
+                    # Find table in chapter tables
+                    chapter_tables = chapter.get("tables", [])
+                    if table_num <= len(chapter_tables):
+                        table_info = chapter_tables[table_num - 1]
+                        try:
+                            builder.add_table(table_info["data"], caption=f"Table {table_num}")
+                            logger.debug(f"Inserted Table {table_num} inline")
+                        except Exception as e:
+                            logger.warning(f"Failed to add Table {table_num}: {e}")
+
+        # Add any remaining images that weren't referenced
+        remaining_images = [
+            img for fig_num, img in images_by_figure.items() if fig_num not in inserted_figures
+        ]
+        remaining_images.extend(images_without_figure)
+
+        if remaining_images:
+            builder.add_heading("Figures", level=1)
+            for img in remaining_images:
                 try:
-                    builder.add_image(img_path)
+                    fig_num = img.get("figure_num")
+                    caption = f"Figure {fig_num}" if fig_num else None
+                    builder.add_image(img["path"], caption=caption)
                 except Exception as e:
-                    logger.warning(f"Failed to add formula image: {e}")
+                    logger.warning(f"Failed to add remaining image: {e}")
 
         # Build PDF
         return builder.build(output_path)

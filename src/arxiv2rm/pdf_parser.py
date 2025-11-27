@@ -101,6 +101,14 @@ class PDFParser:
                 r"^Draft",  # Draft markers
                 r"^Page\s+\d+",  # Page numbers
                 r"^\d+\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)",  # Dates
+                r"^NIH\s+Public\s+Access",  # NIH archive header
+                r"^Author\s+Manuscript",  # NIH/PMC author manuscript header
+                r"^NIH-PA\s+Author",  # NIH-PA Author Manuscript
+                r"^PMC\s+",  # PMC headers
+                r"^Review$",  # Generic "Review" header
+                r"^Article$",  # Generic "Article" header
+                r"^Research\s+Article$",  # Journal article type header
+                r"^Original\s+Article$",  # Journal article type header
             ]
             skip_regex = re.compile("|".join(skip_patterns), re.IGNORECASE)
 
@@ -694,6 +702,41 @@ class PDFParser:
         logger.info(f"Extracted text from {len(pages)} pages (with {table_count} tables)")
         return pages
 
+    def _extract_tables_pdfplumber(self, pdf_path: Path) -> Dict[int, List]:
+        """
+        Extract tables from PDF using pdfplumber.
+
+        Args:
+            pdf_path: Path to PDF file
+
+        Returns:
+            Dict mapping page number (1-indexed) to list of tables.
+            Each table is a 2D list of cell contents.
+        """
+        tables_by_page: Dict[int, List] = {}
+
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                if tables:
+                    # Filter out empty/invalid tables
+                    valid_tables = []
+                    for table in tables:
+                        if table and len(table) > 0 and len(table[0]) > 0:
+                            # Check table has some content
+                            has_content = any(
+                                cell and str(cell).strip() for row in table for cell in row
+                            )
+                            if has_content:
+                                valid_tables.append(table)
+
+                    if valid_tables:
+                        tables_by_page[page.page_number] = valid_tables
+
+        table_count = sum(len(tables) for tables in tables_by_page.values())
+        logger.info(f"Extracted {table_count} tables from {len(tables_by_page)} pages")
+        return tables_by_page
+
     def extract_text_column_aware(self, pdf_path: Path) -> List[Dict]:
         """
         Extract text with automatic column detection and reordering.
@@ -1168,16 +1211,22 @@ class PDFParser:
                     pages = self.extract_text_pdfplumber(pdf_path)
             else:
                 # Use standard extraction for single-column
-                # If we have exclusions, use PyMuPDF which supports them
-                if exclude_regions:
-                    logger.info("Using PyMuPDF with formula exclusions")
-                    pages = self.extract_text_pymupdf(pdf_path, exclude_regions=exclude_regions)
-                else:
-                    try:
-                        pages = self.extract_text_pdfplumber(pdf_path)
-                    except Exception as e:
-                        logger.warning(f"pdfplumber failed: {e}, falling back to PyMuPDF")
-                        pages = self.extract_text_pymupdf(pdf_path)
+                # Use PyMuPDF for text extraction - pdfplumber loses word spacing
+                # in some PDFs (especially MDPI publications)
+                # Also extract tables with pdfplumber
+                logger.info("Using PyMuPDF for text extraction (preserves word spacing)")
+                pages = self.extract_text_pymupdf(pdf_path, exclude_regions=exclude_regions)
+
+                # Extract tables separately with pdfplumber
+                logger.info("Extracting tables with pdfplumber...")
+                try:
+                    tables_by_page = self._extract_tables_pdfplumber(pdf_path)
+                    # Add tables to page data
+                    for page_data in pages:
+                        page_num = page_data.get("page_num", 0)
+                        page_data["tables"] = tables_by_page.get(page_num, [])
+                except Exception as e:
+                    logger.warning(f"Table extraction failed: {e}")
 
         return {
             "analysis": analysis,
