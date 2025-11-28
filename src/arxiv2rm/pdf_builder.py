@@ -75,10 +75,10 @@ class PDFBuilderConfig:
     margin_left: float = 54
     margin_right: float = 54
 
-    # Typography
+    # Typography - improved for readability
     font_size: int = 14  # Default, options: 12, 14, 16, 18
-    line_height_ratio: float = 1.5  # Line height as ratio of font size
-    paragraph_spacing: float = 6  # Space between paragraphs in points
+    line_height_ratio: float = 1.6  # Increased line height for better readability
+    paragraph_spacing: float = 12  # Increased space between paragraphs
 
     # Font family
     font_family: str = "OpenDyslexic"
@@ -194,15 +194,16 @@ class PDFBuilder:
 
         styles = {}
 
-        # Normal paragraph
+        # Normal paragraph - improved spacing for readability
         styles["Normal"] = ParagraphStyle(
             name="Normal",
             fontName=base_font,
             fontSize=font_size,
             leading=line_height,
-            spaceBefore=0,
+            spaceBefore=4,  # Small space before each paragraph
             spaceAfter=self.config.paragraph_spacing,
             alignment=0,  # Left aligned
+            firstLineIndent=0,  # No indent for cleaner look
         )
 
         # Title
@@ -216,14 +217,14 @@ class PDFBuilder:
             alignment=1,  # Center
         )
 
-        # Headings
+        # Headings - improved spacing for visual hierarchy
         styles["Heading1"] = ParagraphStyle(
             name="Heading1",
             fontName=f"{base_font}-Bold" if self.config.use_opendyslexic else "Helvetica-Bold",
             fontSize=font_size + 4,
-            leading=(font_size + 4) * 1.3,
-            spaceBefore=18,
-            spaceAfter=8,
+            leading=(font_size + 4) * 1.4,
+            spaceBefore=24,  # More space before major headings
+            spaceAfter=12,
             keepWithNext=True,
         )
 
@@ -231,9 +232,9 @@ class PDFBuilder:
             name="Heading2",
             fontName=f"{base_font}-Bold" if self.config.use_opendyslexic else "Helvetica-Bold",
             fontSize=font_size + 2,
-            leading=(font_size + 2) * 1.3,
-            spaceBefore=14,
-            spaceAfter=6,
+            leading=(font_size + 2) * 1.4,
+            spaceBefore=20,
+            spaceAfter=10,
             keepWithNext=True,
         )
 
@@ -241,9 +242,9 @@ class PDFBuilder:
             name="Heading3",
             fontName=f"{base_font}-Bold" if self.config.use_opendyslexic else "Helvetica-Bold",
             fontSize=font_size,
-            leading=font_size * 1.3,
-            spaceBefore=10,
-            spaceAfter=4,
+            leading=font_size * 1.4,
+            spaceBefore=16,
+            spaceAfter=8,
             keepWithNext=True,
         )
 
@@ -443,26 +444,36 @@ class PDFBuilder:
         if data:
             self.content.append(("table", (data, caption, header_row)))
 
-    def _clean_text(self, text: str) -> str:
+    def _clean_text(self, text: str, preserve_newlines: bool = False) -> str:
         """
         Clean text for PDF rendering.
 
         - Normalize whitespace
         - Handle special characters
         - Escape XML entities for reportlab
+
+        Args:
+            text: Text to clean
+            preserve_newlines: If True, convert newlines to <br/> for reportlab
         """
         if not text:
             return ""
 
-        # Normalize whitespace (preserve single spaces)
-        text = re.sub(r"\s+", " ", text)
-        text = text.strip()
-
-        # Escape XML entities (reportlab uses XML-style markup)
+        # Escape XML entities first (reportlab uses XML-style markup)
         text = text.replace("&", "&amp;")
         text = text.replace("<", "&lt;")
         text = text.replace(">", "&gt;")
 
+        if preserve_newlines:
+            # Replace newlines with <br/> tags for reportlab
+            text = re.sub(r"\n+", "<br/>", text)
+            # Normalize other whitespace
+            text = re.sub(r"[ \t]+", " ", text)
+        else:
+            # Normalize all whitespace (including newlines) to single spaces
+            text = re.sub(r"\s+", " ", text)
+
+        text = text.strip()
         return text
 
     def _detect_heading_level(self, text: str) -> Optional[int]:
@@ -621,7 +632,7 @@ class PDFBuilder:
         header_row: bool = True,
     ) -> Optional[Table]:
         """
-        Create a reportlab Table flowable.
+        Create a reportlab Table flowable with intelligent column sizing.
 
         Args:
             data: 2D list of cell contents
@@ -635,45 +646,112 @@ class PDFBuilder:
             return None
 
         try:
-            # Clean cell contents
+            # Clean cell contents and wrap in Paragraph for text wrapping
             cleaned_data = []
-            for row in data:
-                cleaned_row = [self._clean_text(str(cell) if cell else "") for cell in row]
+            max_col_lengths = []  # Track max content length per column
+            num_cols = len(data[0])
+
+            # Initialize max lengths
+            for _ in range(num_cols):
+                max_col_lengths.append(0)
+
+            # Create cell style for table
+            cell_style = ParagraphStyle(
+                name="TableCell",
+                fontName=self._styles["Normal"].fontName,
+                fontSize=self.config.font_size - 2,
+                leading=(self.config.font_size - 2) * 1.3,
+                spaceBefore=0,
+                spaceAfter=0,
+            )
+            header_style = ParagraphStyle(
+                name="TableHeader",
+                fontName=f"{'OpenDyslexic' if self.config.use_opendyslexic else 'Helvetica'}-Bold",
+                fontSize=self.config.font_size - 2,
+                leading=(self.config.font_size - 2) * 1.3,
+                spaceBefore=0,
+                spaceAfter=0,
+            )
+
+            for row_idx, row in enumerate(data):
+                cleaned_row = []
+                for col_idx, cell in enumerate(row):
+                    cell_text = self._clean_text(str(cell) if cell else "")
+                    # Track max length for column width calculation
+                    max_col_lengths[col_idx] = max(max_col_lengths[col_idx], len(cell_text))
+                    # Use Paragraph for text wrapping
+                    style = header_style if (header_row and row_idx == 0) else cell_style
+                    cleaned_row.append(Paragraph(cell_text, style))
                 cleaned_data.append(cleaned_row)
 
-            # Calculate column widths (distribute evenly with max width constraint)
-            num_cols = len(cleaned_data[0])
-            col_width = min(content_width / num_cols, 100)  # Max 100pt per column
-            col_widths = [col_width] * num_cols
+            # Calculate intelligent column widths based on content
+            # For tables with many columns, we need to ensure minimum readable width
+            total_chars = sum(max_col_lengths)
+
+            # If too many columns for the page width, use simpler text rendering
+            if num_cols > 12:
+                # Too many columns - fall back to simpler layout
+                # Use minimum viable width per column
+                min_col_width = 28  # Just enough for a few chars
+                col_widths = [min_col_width] * num_cols
+            elif total_chars > 0:
+                col_widths = []
+                # Calculate approximate character width at font size
+                char_width = (self.config.font_size - 2) * 0.6
+
+                for length in max_col_lengths:
+                    # Width based on content length, with minimum for readability
+                    # At least 35pt to fit "0.95" comfortably
+                    width = max(35, length * char_width + 8)  # +8 for padding
+                    col_widths.append(width)
+
+                # Check if total width exceeds content width
+                total_width = sum(col_widths)
+                if total_width > content_width:
+                    # Scale down proportionally
+                    scale = content_width / total_width
+                    col_widths = [w * scale for w in col_widths]
+
+                    # Ensure minimum readable width after scaling
+                    min_readable = 30
+                    col_widths = [max(min_readable, w) for w in col_widths]
+            else:
+                # Fall back to equal widths
+                col_widths = [content_width / num_cols] * num_cols
 
             # Create table
             table = Table(cleaned_data, colWidths=col_widths)
 
-            # Define table style
+            # Define table style with improved padding and borders
             style_commands = [
-                # Grid
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-                # Padding
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                # Font
-                ("FONTNAME", (0, 0), (-1, -1), self._styles["Normal"].fontName),
-                ("FONTSIZE", (0, 0), (-1, -1), self.config.font_size - 2),
+                # Grid - lighter for readability
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.Color(0.7, 0.7, 0.7)),
+                # Increased padding for readability
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
                 # Alignment
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("ALIGN", (0, 0), (-1, -1), "LEFT"),
             ]
 
             # Header row styling
             if header_row and len(cleaned_data) > 1:
-                base_font = "OpenDyslexic" if self.config.use_opendyslexic else "Helvetica"
                 style_commands.extend(
                     [
-                        ("FONTNAME", (0, 0), (-1, 0), f"{base_font}-Bold"),
-                        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.Color(0.9, 0.9, 0.9)),
+                        ("LINEBELOW", (0, 0), (-1, 0), 1, colors.Color(0.5, 0.5, 0.5)),
+                        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
                     ]
                 )
+
+            # Alternating row colors for better readability
+            for row_idx in range(1, len(cleaned_data)):
+                if row_idx % 2 == 0:
+                    style_commands.append(
+                        ("BACKGROUND", (0, row_idx), (-1, row_idx), colors.Color(0.97, 0.97, 0.97))
+                    )
 
             table.setStyle(TableStyle(style_commands))
             return table
@@ -1302,6 +1380,7 @@ def convert_latex_to_remarkable(
     font_size: int = 14,
     title: Optional[str] = None,
     authors: Optional[List[str]] = None,
+    render_tables_as_images: bool = True,
 ) -> Path:
     """
     Convert LaTeX source to reMarkable-optimized PDF.
@@ -1314,13 +1393,17 @@ def convert_latex_to_remarkable(
         main_tex_file: Path to main .tex file
         output_path: Path for output PDF (default: latex_dir/../output.pdf)
         font_size: Font size (12, 14, 16, or 18)
+        render_tables_as_images: If True, render tables as images using pdflatex
         title: Override title (default: extracted from LaTeX)
         authors: Override authors (default: extracted from LaTeX)
 
     Returns:
         Path to the generated PDF
     """
+    import tempfile
+
     from .latex_processor import LaTeXProcessor
+    from .table_renderer import TableRenderer
 
     latex_dir = Path(latex_dir)
     main_tex_file = Path(main_tex_file)
@@ -1333,6 +1416,22 @@ def convert_latex_to_remarkable(
     # Parse LaTeX document
     processor = LaTeXProcessor(latex_dir, main_tex_file)
     doc = processor.process()
+
+    # Initialize table renderer if needed
+    table_renderer = None
+    table_images: Dict[str, Path] = {}  # label -> image path
+    if render_tables_as_images and doc.tables:
+        temp_dir = Path(tempfile.mkdtemp(prefix="arxiv2rm_tables_"))
+        table_renderer = TableRenderer(cache_dir=temp_dir / "cache")
+
+        # Render all tables as images
+        for tab in doc.tables:
+            if tab.content and tab.label:
+                output_img = temp_dir / f"table_{tab.number}.png"
+                rendered = table_renderer.render(tab, output_img)
+                if rendered:
+                    table_images[tab.label] = rendered
+                    logger.info(f"Rendered table {tab.number} ({tab.label}) as image")
 
     # Initialize builder
     config = PDFBuilderConfig(font_size=font_size)
@@ -1405,16 +1504,25 @@ def convert_latex_to_remarkable(
                         inserted_figures.add(ref_label)
                         logger.debug(f"Inserted figure {fig.number}: {ref_label}")
 
-        # Insert tables referenced in this section (as text for now)
+        # Insert tables referenced in this section
         for ref_label in section.table_refs:
             if ref_label in label_to_table and ref_label not in inserted_tables:
                 tab = label_to_table[ref_label]
                 caption = f"Table {tab.number}"
                 if tab.caption:
                     caption += f": {tab.caption}"
-                builder.add_heading(caption, level=3)
 
-                # Convert tabular to readable text
+                # Check if we have a rendered image for this table
+                if ref_label in table_images:
+                    img_path = table_images[ref_label]
+                    if img_path.exists():
+                        builder.add_image(img_path, caption=caption)
+                        inserted_tables.add(ref_label)
+                        logger.debug(f"Inserted table {tab.number} as image: {ref_label}")
+                        continue
+
+                # Fallback: render table as structured text
+                builder.add_heading(caption, level=3)
                 if tab.content:
                     # Simple table rendering: extract cell contents
                     table_html = LaTeXProcessor.tabular_to_html(tab.content)
@@ -1425,7 +1533,7 @@ def convert_latex_to_remarkable(
                         builder.add_paragraph(table_text, style="Normal")
 
                 inserted_tables.add(ref_label)
-                logger.debug(f"Inserted table {tab.number}: {ref_label}")
+                logger.debug(f"Inserted table {tab.number} as text: {ref_label}")
 
     # Add any remaining figures not referenced in sections
     for fig in doc.figures:
@@ -1438,6 +1546,31 @@ def convert_latex_to_remarkable(
                         caption += f": {fig.caption}"
                     builder.add_image(img_path, caption=caption)
                     logger.debug(f"Inserted unreferenced figure {fig.number}")
+
+    # Add any remaining tables not referenced in sections
+    for tab in doc.tables:
+        if tab.label and tab.label not in inserted_tables:
+            caption = f"Table {tab.number}"
+            if tab.caption:
+                caption += f": {tab.caption}"
+
+            # Check if we have a rendered image for this table
+            if tab.label in table_images:
+                img_path = table_images[tab.label]
+                if img_path.exists():
+                    builder.add_image(img_path, caption=caption)
+                    logger.debug(f"Inserted unreferenced table {tab.number} as image")
+                    continue
+
+            # Fallback: add table as text
+            builder.add_heading(caption, level=3)
+            if tab.content:
+                table_html = LaTeXProcessor.tabular_to_html(tab.content)
+                table_text = re.sub(r"<[^>]+>", " ", table_html)
+                table_text = re.sub(r"\s+", " ", table_text).strip()
+                if table_text:
+                    builder.add_paragraph(table_text, style="Normal")
+            logger.debug(f"Inserted unreferenced table {tab.number} as text")
 
     # Build output PDF
     output_path = builder.build(output_path)

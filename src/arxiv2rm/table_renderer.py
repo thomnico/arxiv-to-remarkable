@@ -27,7 +27,18 @@ class TableRenderer:
 \usepackage{booktabs}
 \usepackage{multirow}
 \usepackage{array}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{colortbl}
+\usepackage{float}
 \usepackage[margin=0.5in]{geometry}
+% Define custom commands used in papers
+\newcommand{\dmodel}{d_{\text{model}}}
+\newcommand{\dff}{d_{\text{ff}}}
+\newcommand{\specialrule}[3]{\toprule}
+% Dummy cite command
+\newcommand{\citep}[1]{}
+\newcommand{\citet}[1]{}
 \pagestyle{empty}
 \begin{document}
 """
@@ -111,9 +122,12 @@ class TableRenderer:
                     timeout=30,
                 )
 
-                if result.returncode != 0 or not pdf_file.exists():
+                # pdflatex may return non-zero even with warnings, check if PDF exists
+                if not pdf_file.exists():
                     logger.error(f"pdflatex failed for table {table.number}: {result.stderr}")
                     return None
+                if result.returncode != 0:
+                    logger.debug(f"pdflatex warnings for table {table.number}")
 
                 # Convert PDF to PNG using ImageMagick
                 convert_result = subprocess.run(

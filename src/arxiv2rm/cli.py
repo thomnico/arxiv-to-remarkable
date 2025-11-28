@@ -204,6 +204,70 @@ def convert(
         console.print(f"[red]Error:[/red] File not found: {url_or_path}")
         sys.exit(1)
 
+    # Check if this is a LaTeX source (.tex file or directory with .tex files)
+    is_latex = False
+    latex_dir = None
+    main_tex_file = None
+
+    if input_path.suffix.lower() == ".tex":
+        is_latex = True
+        latex_dir = input_path.parent
+        main_tex_file = input_path
+    elif input_path.is_dir():
+        # Check for .tex files in directory
+        tex_files = list(input_path.glob("*.tex"))
+        if tex_files:
+            is_latex = True
+            latex_dir = input_path
+            # Try to find main file
+            for candidate in ["main.tex", "paper.tex", "ms.tex", "article.tex"]:
+                if (input_path / candidate).exists():
+                    main_tex_file = input_path / candidate
+                    break
+            if main_tex_file is None:
+                # Use first tex file
+                main_tex_file = tex_files[0]
+
+    if is_latex:
+        # LaTeX source conversion
+        from arxiv2rm.pdf_builder import convert_latex_to_remarkable
+
+        console.print(f"[bold blue]Converting LaTeX source:[/bold blue] {main_tex_file.name}")
+        console.print(f"[dim]Source directory: {latex_dir}[/dim]")
+
+        # Determine output path
+        if output:
+            output_path = Path(output)
+        else:
+            output_path = latex_dir / f"{main_tex_file.stem}_remarkable.pdf"
+
+        console.print(f"[dim]Output: {output_path}[/dim]")
+
+        try:
+            with Progress(console=console, transient=True) as progress:
+                task = progress.add_task("[cyan]Converting LaTeX to PDF...", total=100)
+                progress.update(task, advance=10)
+
+                result_path = convert_latex_to_remarkable(
+                    latex_dir=latex_dir,
+                    main_tex_file=main_tex_file,
+                    output_path=output_path,
+                    font_size=14,
+                    title=title,
+                    authors=list(author) if author else None,
+                    render_tables_as_images=True,
+                )
+                progress.update(task, advance=90)
+
+            console.print("\n[bold green]Conversion successful![/bold green]")
+            console.print(f"[green]Output:[/green] {result_path}")
+            return
+
+        except Exception as e:
+            console.print("\n[bold red]Conversion failed![/bold red]")
+            console.print(f"[red]Error:[/red] {e}")
+            sys.exit(1)
+
     if not input_path.suffix.lower() == ".pdf":
         console.print(f"[yellow]Warning:[/yellow] Expected PDF file, got {input_path.suffix}")
 
