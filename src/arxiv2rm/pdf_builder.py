@@ -466,6 +466,7 @@ class PDFBuilder:
         - Normalize whitespace
         - Handle special characters
         - Escape XML entities for reportlab
+        - Preserve ReportLab markup tags like <link>, <b>, <i>, etc.
 
         Args:
             text: Text to clean
@@ -474,10 +475,34 @@ class PDFBuilder:
         if not text:
             return ""
 
-        # Escape XML entities first (reportlab uses XML-style markup)
+        # First, protect ReportLab markup tags from escaping
+        # Common tags: <link>, </link>, <b>, </b>, <i>, </i>, <br/>, <br>
+        import uuid
+
+        protected = {}
+
+        def protect_tag(match):
+            tag = match.group(0)
+            placeholder = f"__TAG_{uuid.uuid4().hex}__"
+            protected[placeholder] = tag
+            return placeholder
+
+        # Protect valid ReportLab XML tags (including attributes)
+        text = re.sub(
+            r"<(/?)(link|b|i|u|br|font|super|sub|para|seq|bullet)(\s+[^>]*)?>",
+            protect_tag,
+            text,
+            flags=re.IGNORECASE,
+        )
+
+        # Escape XML entities (for any remaining < and > that aren't tags)
         text = text.replace("&", "&amp;")
         text = text.replace("<", "&lt;")
         text = text.replace(">", "&gt;")
+
+        # Restore protected tags
+        for placeholder, tag in protected.items():
+            text = text.replace(placeholder, tag)
 
         if preserve_newlines:
             # Replace newlines with <br/> tags for reportlab
