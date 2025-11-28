@@ -77,3 +77,10 @@ remarkable_credentials.json
 # Build artifacts
 *.pyc
 *.pyo
+
+# Example PDFs (test papers)
+exemples/
+
+# Tracking documentation (generated)
+EPIC_AND_ISSUES_COMPLETE.md
+GITHUB_ISSUES_UPDATED.md
