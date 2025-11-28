@@ -47,6 +47,19 @@ class BookmarkFlowable(Flowable):
         self.canv.addOutlineEntry(self.title, self.key, level=self.level)
 
 
+class AnchorFlowable(Flowable):
+    """Invisible flowable that creates a named destination for internal links."""
+
+    def __init__(self, name: str):
+        Flowable.__init__(self)
+        self.name = name
+        self.width = 0
+        self.height = 0
+
+    def draw(self):
+        self.canv.bookmarkPage(self.name)
+
+
 # reMarkable 1 display specifications
 # 10.3" E Ink display, 1872×1404 pixels (portrait), 226 DPI
 REMARKABLE_WIDTH_PX = 1404
@@ -377,6 +390,7 @@ class PDFBuilder:
         image_path: Path,
         caption: Optional[str] = None,
         max_width: Optional[float] = None,
+        anchor: Optional[str] = None,
     ):
         """
         Add an image.
@@ -385,8 +399,9 @@ class PDFBuilder:
             image_path: Path to image file
             caption: Optional caption text
             max_width: Maximum width in points (default: content width * 0.9)
+            anchor: Optional anchor name for internal links (e.g., "fig:model-arch")
         """
-        self.content.append(("image", (image_path, caption, max_width)))
+        self.content.append(("image", (image_path, caption, max_width, anchor)))
 
     def add_formula_image(self, image_path: Path, caption: Optional[str] = None):
         """
@@ -574,7 +589,17 @@ class PDFBuilder:
                 flowables.append(p)
 
             elif content_type == "image":
-                image_path, caption, max_width = content_data
+                # Unpack with optional anchor (for backwards compatibility)
+                if len(content_data) == 4:
+                    image_path, caption, max_width, anchor = content_data
+                else:
+                    image_path, caption, max_width = content_data
+                    anchor = None
+
+                # Add anchor for internal links if provided
+                if anchor:
+                    flowables.append(AnchorFlowable(anchor))
+
                 img = self._create_image_flowable(image_path, content_width, max_width)
                 if img:
                     flowables.append(img)
@@ -611,6 +636,10 @@ class PDFBuilder:
                 # Reference entry with smaller font
                 p = Paragraph(content_data, self._styles["Reference"])
                 flowables.append(p)
+
+            elif content_type == "anchor":
+                # Named destination for internal links
+                flowables.append(AnchorFlowable(content_data))
 
             elif content_type == "table":
                 data, caption, header_row = content_data
@@ -1381,6 +1410,7 @@ def convert_latex_to_remarkable(
     title: Optional[str] = None,
     authors: Optional[List[str]] = None,
     render_tables_as_images: bool = True,
+    render_math_as_images: bool = True,
 ) -> Path:
     """
     Convert LaTeX source to reMarkable-optimized PDF.
@@ -1394,6 +1424,7 @@ def convert_latex_to_remarkable(
         output_path: Path for output PDF (default: latex_dir/../output.pdf)
         font_size: Font size (12, 14, 16, or 18)
         render_tables_as_images: If True, render tables as images using pdflatex
+        render_math_as_images: If True, render display math as images using pdflatex
         title: Override title (default: extracted from LaTeX)
         authors: Override authors (default: extracted from LaTeX)
 
@@ -1403,6 +1434,7 @@ def convert_latex_to_remarkable(
     import tempfile
 
     from .latex_processor import LaTeXProcessor
+    from .math_renderer import MathFormula, MathRenderer
     from .table_renderer import TableRenderer
 
     latex_dir = Path(latex_dir)
@@ -1417,12 +1449,14 @@ def convert_latex_to_remarkable(
     processor = LaTeXProcessor(latex_dir, main_tex_file)
     doc = processor.process()
 
+    # Create temp directory for rendered images
+    temp_dir = Path(tempfile.mkdtemp(prefix="arxiv2rm_latex_"))
+
     # Initialize table renderer if needed
     table_renderer = None
     table_images: Dict[str, Path] = {}  # label -> image path
     if render_tables_as_images and doc.tables:
-        temp_dir = Path(tempfile.mkdtemp(prefix="arxiv2rm_tables_"))
-        table_renderer = TableRenderer(cache_dir=temp_dir / "cache")
+        table_renderer = TableRenderer(cache_dir=temp_dir / "table_cache")
 
         # Render all tables as images
         for tab in doc.tables:
@@ -1432,6 +1466,32 @@ def convert_latex_to_remarkable(
                 if rendered:
                     table_images[tab.label] = rendered
                     logger.info(f"Rendered table {tab.number} ({tab.label}) as image")
+
+    # Initialize math renderer and render display math as images
+    # Use content hash as key for matching markers in text
+    import hashlib
+
+    math_images: Dict[str, Path] = {}  # content_hash -> image path
+    if render_math_as_images and doc.math_formulas:
+        math_renderer = MathRenderer(cache_dir=temp_dir / "math_cache")
+        display_formulas = [f for f in doc.math_formulas if f.is_display]
+        logger.info(f"Rendering {len(display_formulas)} display math formulas...")
+
+        for formula in display_formulas:
+            # Generate hash from latex code (same as in _clean_latex_content)
+            content_hash = hashlib.md5(formula.latex_code.encode()).hexdigest()[:8]
+            output_img = temp_dir / f"math_{content_hash}.png"
+
+            # Convert latex_processor.MathFormula to math_renderer.MathFormula
+            renderer_formula = MathFormula(
+                latex_code=formula.latex_code,
+                is_display=formula.is_display,
+                formula_id=formula.formula_id,
+            )
+            rendered = math_renderer.render(renderer_formula, output_img)
+            if rendered:
+                math_images[content_hash] = rendered
+                logger.debug(f"Rendered math {content_hash}: {formula.latex_code[:30]}...")
 
     # Initialize builder
     config = PDFBuilderConfig(font_size=font_size)
@@ -1475,18 +1535,54 @@ def convert_latex_to_remarkable(
 
         # Add section content
         if section.content:
-            # Clean up reference markers before adding
+            # Convert reference markers to clickable links
             content = section.content
-            # Replace <<<REF:label>>> with readable text
-            content = re.sub(r"<<<REF:fig:([^>]+)>>>", r"Figure", content)
-            content = re.sub(r"<<<REF:tab:([^>]+)>>>", r"Table", content)
+
+            # Replace <<<REF:fig:label>>> with clickable link
+            def make_fig_link(match):
+                label = match.group(1)
+                fig = label_to_figure.get(f"fig:{label}")
+                if fig:
+                    # Use <link> tag for internal PDF link
+                    return (
+                        f'<link destination="fig:{label}" color="blue">Figure {fig.number}</link>'
+                    )
+                return "Figure"
+
+            def make_tab_link(match):
+                label = match.group(1)
+                tab = label_to_table.get(f"tab:{label}")
+                if tab:
+                    return f'<link destination="tab:{label}" color="blue">Table {tab.number}</link>'
+                return "Table"
+
+            content = re.sub(r"<<<REF:fig:([^>]+)>>>", make_fig_link, content)
+            content = re.sub(r"<<<REF:tab:([^>]+)>>>", make_tab_link, content)
             content = re.sub(r"<<<REF:[^>]+>>>", "", content)
 
-            # Split content into paragraphs
+            # Split content into paragraphs, handling display math markers
             paragraphs = content.split("\n\n")
             for para in paragraphs:
                 para = para.strip()
-                if para:
+                if not para:
+                    continue
+
+                # Check if this is a display math marker
+                math_match = re.match(r"<<<DISPLAY_MATH:([a-f0-9]+)>>>", para)
+                if math_match:
+                    content_hash = math_match.group(1)
+                    if content_hash in math_images:
+                        # Insert the rendered math formula image
+                        builder.add_formula_image(math_images[content_hash])
+                        logger.debug(f"Inserted math formula image: {content_hash}")
+                    else:
+                        # Fallback: show placeholder if math rendering failed
+                        builder.add_paragraph("[equation]")
+                        logger.warning(f"Math image not found for hash: {content_hash}")
+                else:
+                    # Regular paragraph - but may contain inline math markers
+                    # Clean up any remaining math markers in text
+                    para = re.sub(r"<<<DISPLAY_MATH:[a-f0-9]+>>>", "[equation]", para)
                     builder.add_paragraph(para)
 
         # Insert figures referenced in this section
@@ -1500,7 +1596,8 @@ def convert_latex_to_remarkable(
                         caption = f"Figure {fig.number}"
                         if fig.caption:
                             caption += f": {fig.caption}"
-                        builder.add_image(img_path, caption=caption)
+                        # Add anchor for internal links
+                        builder.add_image(img_path, caption=caption, anchor=ref_label)
                         inserted_figures.add(ref_label)
                         logger.debug(f"Inserted figure {fig.number}: {ref_label}")
 
@@ -1516,12 +1613,14 @@ def convert_latex_to_remarkable(
                 if ref_label in table_images:
                     img_path = table_images[ref_label]
                     if img_path.exists():
-                        builder.add_image(img_path, caption=caption)
+                        # Add anchor for internal links
+                        builder.add_image(img_path, caption=caption, anchor=ref_label)
                         inserted_tables.add(ref_label)
                         logger.debug(f"Inserted table {tab.number} as image: {ref_label}")
                         continue
 
-                # Fallback: render table as structured text
+                # Fallback: render table as structured text (with anchor)
+                builder.content.append(("anchor", ref_label))  # Add anchor before table
                 builder.add_heading(caption, level=3)
                 if tab.content:
                     # Simple table rendering: extract cell contents
@@ -1544,7 +1643,8 @@ def convert_latex_to_remarkable(
                     caption = f"Figure {fig.number}"
                     if fig.caption:
                         caption += f": {fig.caption}"
-                    builder.add_image(img_path, caption=caption)
+                    # Include anchor for potential links
+                    builder.add_image(img_path, caption=caption, anchor=fig.label)
                     logger.debug(f"Inserted unreferenced figure {fig.number}")
 
     # Add any remaining tables not referenced in sections
@@ -1558,11 +1658,13 @@ def convert_latex_to_remarkable(
             if tab.label in table_images:
                 img_path = table_images[tab.label]
                 if img_path.exists():
-                    builder.add_image(img_path, caption=caption)
+                    # Include anchor for potential links
+                    builder.add_image(img_path, caption=caption, anchor=tab.label)
                     logger.debug(f"Inserted unreferenced table {tab.number} as image")
                     continue
 
-            # Fallback: add table as text
+            # Fallback: add table as text (with anchor)
+            builder.content.append(("anchor", tab.label))
             builder.add_heading(caption, level=3)
             if tab.content:
                 table_html = LaTeXProcessor.tabular_to_html(tab.content)

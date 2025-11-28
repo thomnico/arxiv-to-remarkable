@@ -32,6 +32,16 @@ class MathRenderer:
 \usepackage{amsmath}
 \usepackage{amssymb}
 \usepackage{amsfonts}
+\usepackage{bm}
+% Common custom commands from papers
+\newcommand{\dmodel}{d_{\text{model}}}
+\newcommand{\dff}{d_{\text{ff}}}
+\newcommand{\dk}{d_k}
+\newcommand{\dv}{d_v}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
 \pagestyle{empty}
 \begin{document}
 """
@@ -174,8 +184,15 @@ class MathRenderer:
         if is_display:
             # Display math - use equation* or align* environment
             if not latex_code.strip().startswith("\\begin{"):
-                # Wrap in displaymath if not already in environment
-                math_content = f"\\[{latex_code}\\]"
+                # Check if this contains align-specific syntax (& for column alignment)
+                # If so, wrap in align* environment instead of displaymath
+                if "&" in latex_code or "\\\\" in latex_code:
+                    # Remove blank lines which break align environment
+                    clean_code = "\n".join(line for line in latex_code.split("\n") if line.strip())
+                    math_content = f"\\begin{{align*}}\n{clean_code}\n\\end{{align*}}"
+                else:
+                    # Wrap in displaymath if not already in environment
+                    math_content = f"\\[{latex_code}\\]"
             else:
                 math_content = latex_code
         else:

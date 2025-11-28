@@ -122,10 +122,16 @@ class LaTeXProcessor:
         doc.abstract = self._extract_abstract(main_soup)
 
         # Extract content recursively (handles \input and \include)
+        # Note: Math formulas are extracted from raw content during this step
         self._extract_content(main_soup, doc, self.main_tex_file)
 
-        # Extract math formulas from raw content
-        self._extract_math_from_sections(doc)
+        # Extract math from abstract if present (from raw LaTeX)
+        if doc.abstract:
+            # Get raw abstract content from the soup
+            abstract_node = main_soup.find("abstract")
+            if abstract_node:
+                raw_abstract = str(abstract_node)
+                self._extract_math_from_text(raw_abstract, doc)
 
         # Build reference map
         doc.references = self._build_reference_map(doc.figures)
@@ -216,6 +222,9 @@ class LaTeXProcessor:
         # Get raw text for parsing
         raw_text = str(soup)
 
+        # Expand \input{} commands inline to get full content
+        raw_text = self._expand_inputs(raw_text, current_file)
+
         # Find all section positions
         section_pattern = r"\\section\{([^}]+)\}"
         section_matches = list(re.finditer(section_pattern, raw_text))
@@ -245,7 +254,10 @@ class LaTeXProcessor:
             # Extract raw content
             raw_content = raw_text[content_start:content_end]
 
-            # Clean and convert to text
+            # Extract math formulas from RAW content BEFORE cleaning
+            self._extract_math_from_text(raw_content, doc)
+
+            # Clean and convert to text (this will replace math with markers)
             content = self._clean_latex_content(raw_content)
 
             # Extract figure/table references from content
@@ -388,23 +400,37 @@ class LaTeXProcessor:
         content = re.sub(r"\\ref\{([^}]+)\}", r"<<<REF:\1>>>", content)
         content = re.sub(r"\\cref\{([^}]+)\}", r"<<<REF:\1>>>", content)
 
-        # Handle math - simplify inline math
+        # Handle inline math - simplify for text display
+        # Convert to readable form with brackets
         content = re.sub(r"\$([^$]+)\$", r"[\1]", content)
 
-        # Remove display math environments but keep a placeholder
+        # Preserve display math environments with markers for image replacement
+        # Use hash of content for consistent matching
+        import hashlib
+
+        def make_display_marker(match):
+            latex_code = match.group(1).strip()
+            content_hash = hashlib.md5(latex_code.encode()).hexdigest()[:8]
+            return f"\n\n<<<DISPLAY_MATH:{content_hash}>>>\n\n"
+
         content = re.sub(
-            r"\\begin\{equation\*?\}.*?\\end\{equation\*?\}",
-            "[equation]",
+            r"\\begin\{equation\*?\}(.*?)\\end\{equation\*?\}",
+            make_display_marker,
             content,
             flags=re.DOTALL,
         )
         content = re.sub(
-            r"\\begin\{align\*?\}.*?\\end\{align\*?\}",
-            "[equation]",
+            r"\\begin\{align\*?\}(.*?)\\end\{align\*?\}",
+            make_display_marker,
             content,
             flags=re.DOTALL,
         )
-        content = re.sub(r"\\\[.*?\\\]", "[equation]", content, flags=re.DOTALL)
+        content = re.sub(
+            r"\\\[(.*?)\\\]",
+            make_display_marker,
+            content,
+            flags=re.DOTALL,
+        )
 
         # Remove other common commands
         content = re.sub(r"\\vspace\{[^}]+\}", "", content)
@@ -542,8 +568,13 @@ class LaTeXProcessor:
             else:
                 content_end = len(raw_text)
 
-            # Extract and clean content
+            # Extract raw content
             raw_content = raw_text[content_start:content_end]
+
+            # Extract math formulas from RAW content BEFORE cleaning
+            self._extract_math_from_text(raw_content, doc)
+
+            # Clean the content
             clean_content = self._node_to_text(TexSoup(raw_content))
 
             # Extract figure/table references from content
@@ -1022,6 +1053,54 @@ class LaTeXProcessor:
 
         return figure_refs, table_refs
 
+    def _expand_inputs(self, raw_text: str, current_file: Path, depth: int = 0) -> str:
+        r"""
+        Expand \input{} commands inline to get full content.
+
+        Args:
+            raw_text: Raw LaTeX text
+            current_file: Current .tex file being processed
+            depth: Recursion depth to prevent infinite loops
+
+        Returns:
+            Text with \input{} commands replaced by file contents
+        """
+        if depth > 10:  # Prevent infinite recursion
+            logger.warning("Max input recursion depth reached")
+            return raw_text
+
+        # Find all \input{filename} patterns
+        input_pattern = r"\\input\{([^}]+)\}"
+
+        def replace_input(match):
+            input_name = match.group(1).strip()
+            # Add .tex extension if missing
+            if not input_name.endswith(".tex"):
+                input_name += ".tex"
+
+            # Try to resolve file path
+            input_path = current_file.parent / input_name
+            if not input_path.exists():
+                input_path = self.latex_dir / input_name
+
+            if input_path.exists():
+                try:
+                    content = input_path.read_text(encoding="utf-8", errors="ignore")
+                    # Remove comments
+                    content = re.sub(r"(?<!\\)%.*$", "", content, flags=re.MULTILINE)
+                    # Recursively expand nested inputs
+                    content = self._expand_inputs(content, input_path, depth + 1)
+                    logger.debug(f"Expanded \\input{{{input_name}}} ({len(content)} chars)")
+                    return content
+                except Exception as e:
+                    logger.warning(f"Failed to expand \\input{{{input_name}}}: {e}")
+                    return match.group(0)  # Keep original
+            else:
+                logger.warning(f"Input file not found: {input_name}")
+                return match.group(0)  # Keep original
+
+        return re.sub(input_pattern, replace_input, raw_text)
+
     def _resolve_input_file(self, input_node: TexNode, current_file: Path) -> Optional[Path]:
         r"""
         Resolve path to \input or \include file.
@@ -1181,7 +1260,9 @@ class LaTeXProcessor:
         # Extract display math: \begin{equation}...\end{equation}
         display_envs = ["equation", "equation*", "align", "align*", "eqnarray", "eqnarray*"]
         for env in display_envs:
-            pattern = rf"\\begin\{{{env}\}}(.*?)\\end\{{{env}\}}"
+            # Escape special regex chars in env name (like * in align*)
+            env_escaped = re.escape(env)
+            pattern = rf"\\begin\{{{env_escaped}\}}(.*?)\\end\{{{env_escaped}\}}"
             for match in re.finditer(pattern, text, re.DOTALL):
                 self.math_counter += 1
                 formula = MathFormula(
