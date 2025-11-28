@@ -1604,6 +1604,14 @@ def convert_latex_to_remarkable(
                         # Fallback: show placeholder if math rendering failed
                         builder.add_paragraph("[equation]")
                         logger.warning(f"Math image not found for hash: {content_hash}")
+                # Check if this is a subsection heading (### Title)
+                elif para.startswith("### "):
+                    heading_text = para[4:].strip()
+                    builder.add_heading(heading_text, level=2)
+                # Check if this is a subsubsection heading (#### Title)
+                elif para.startswith("#### "):
+                    heading_text = para[5:].strip()
+                    builder.add_heading(heading_text, level=3)
                 else:
                     # Regular paragraph - but may contain inline math markers
                     # Clean up any remaining math markers in text
