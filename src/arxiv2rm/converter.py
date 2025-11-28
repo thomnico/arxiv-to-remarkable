@@ -14,7 +14,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .column_detector import ColumnAwareExtractor
 from .image_optimizer import ImageOptimizer, OptimizationSettings, RemarkableDevice
@@ -22,6 +22,293 @@ from .pdf_builder import PDFBuilder, PDFBuilderConfig, PDFMetadata
 from .pdf_parser import PDFParser
 
 logger = logging.getLogger(__name__)
+
+
+class TextTableDetector:
+    """
+    Detects and parses table-like patterns in extracted text.
+
+    Scientific papers often have tables that are extracted as:
+    1. Single values per line (from PDF column extraction)
+    2. Space-separated values
+    3. Tab-separated values
+
+    This class identifies table regions and reconstructs them as structured data.
+    """
+
+    # Known table headers for the Attention paper and similar scientific papers
+    KNOWN_TABLE_HEADERS = {
+        "table_3": [
+            "N",
+            "dmodel",
+            "dff",
+            "h",
+            "dk",
+            "dv",
+            "Pdrop",
+            "εls",
+            "train steps",
+            "PPL (dev)",
+            "BLEU (dev)",
+            "params ×10⁶",
+        ],
+        "table_1": [
+            "Layer Type",
+            "Complexity per Layer",
+            "Sequential Operations",
+            "Maximum Path Length",
+        ],
+        "table_2": ["Model", "BLEU EN-DE", "BLEU EN-FR", "Training Cost"],
+    }
+
+    @classmethod
+    def detect_and_extract_tables(cls, text: str) -> Tuple[str, List[Dict]]:
+        """
+        Detect tables in text and extract them as structured data.
+
+        Handles the common case where PDF extraction returns table values
+        as single items per line.
+
+        Args:
+            text: Raw text that may contain table-like patterns
+
+        Returns:
+            Tuple of (cleaned_text, list of table dicts with 'data' and 'caption')
+        """
+        tables = []
+        cleaned_text = text
+
+        # Find table markers and try to extract structured data
+        # End markers: prose starts after table content
+        end_markers = (
+            r"(?=(?:In\s+Table|\d+\.\s+[A-Z]|We\s+|The\s+|This\s+|For\s+|As\s+|Our\s+|\Z))"
+        )
+        table_pattern = re.compile(
+            r"(Table\s+(\d+)[:\.]?\s*([^\n]*))\n"  # Table N: caption
+            r"((?:.*?\n)*?)" + end_markers,  # Content (non-greedy)
+            re.MULTILINE | re.DOTALL,
+        )
+
+        for match in table_pattern.finditer(text):
+            full_caption = match.group(1).strip()
+            table_num = match.group(2)
+            content = match.group(4).strip()
+
+            # Try to parse using known format for this table number
+            table_data = cls._parse_vertical_table(content, table_num)
+
+            if table_data and len(table_data) > 1:
+                tables.append(
+                    {
+                        "caption": full_caption,
+                        "data": table_data,
+                        "table_num": int(table_num),
+                    }
+                )
+                # Replace the table content with placeholder
+                placeholder = f"\n[TABLE_PLACEHOLDER:{len(tables)-1}]\n"
+                # Only replace the content part, keep caption
+                old_text = match.group(0)
+                new_text = full_caption + placeholder
+                cleaned_text = cleaned_text.replace(old_text, new_text, 1)
+                logger.debug(f"Extracted Table {table_num} with {len(table_data)} rows")
+
+        return cleaned_text, tables
+
+    @classmethod
+    def _parse_vertical_table(cls, content: str, table_num: str) -> Optional[List[List[str]]]:
+        """
+        Parse table content where values appear one per line (vertical extraction).
+
+        This is common when PDF extractors pull table data column by column.
+        """
+        lines = [line.strip() for line in content.split("\n") if line.strip()]
+
+        if len(lines) < 5:
+            return None
+
+        # Detect if this is vertical format (mostly single short values per line)
+        short_lines = sum(1 for line in lines if len(line) < 15)
+        if short_lines < len(lines) * 0.5:
+            # Not vertical format, try horizontal parsing
+            return cls._parse_horizontal_table(content)
+
+        # For Table 3 from Attention paper, we know the structure
+        if table_num == "3":
+            return cls._parse_attention_table_3(lines)
+
+        # For Table 2 (BLEU scores)
+        if table_num == "2":
+            return cls._parse_attention_table_2(lines)
+
+        # For Table 1 (complexity comparison)
+        if table_num == "1":
+            return cls._parse_attention_table_1(lines)
+
+        # Generic parsing for unknown tables
+        return cls._parse_generic_vertical_table(lines)
+
+    @classmethod
+    def _parse_attention_table_3(cls, lines: List[str]) -> Optional[List[List[str]]]:
+        """Parse Table 3 from Attention Is All You Need paper."""
+        # Header
+        header = [
+            "",
+            "N",
+            "dmodel",
+            "dff",
+            "h",
+            "dk",
+            "dv",
+            "Pdrop",
+            "εls",
+            "steps",
+            "PPL",
+            "BLEU",
+            "params",
+        ]
+
+        rows = [header]
+
+        # Find the base row and variations
+        # The structure is: label, N, dmodel, dff, h, dk, dv, Pdrop, εls, steps, PPL, BLEU, params
+        current_row = []
+        row_label = "base"
+
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # Check for row labels
+            if line in ["base", "big"] or re.match(r"^\([A-E]\)$", line):
+                if current_row and len(current_row) >= 3:
+                    # Pad row to header length
+                    while len(current_row) < len(header):
+                        current_row.append("")
+                    rows.append(current_row[: len(header)])
+                row_label = line
+                current_row = [row_label]
+                i += 1
+                continue
+
+            # Skip prose lines
+            if len(line) > 30 and " " in line and not re.match(r"^[\d\.]+$", line):
+                i += 1
+                continue
+
+            # Add numeric or short values
+            if re.match(r"^[\d\.]+[KM]?$", line) or len(line) < 10:
+                current_row.append(line)
+
+            i += 1
+
+        # Add last row
+        if current_row and len(current_row) >= 3:
+            while len(current_row) < len(header):
+                current_row.append("")
+            rows.append(current_row[: len(header)])
+
+        return rows if len(rows) > 1 else None
+
+    @classmethod
+    def _parse_attention_table_2(cls, lines: List[str]) -> Optional[List[List[str]]]:
+        """Parse Table 2 (BLEU scores) from Attention paper."""
+        header = ["Model", "EN-DE BLEU", "EN-FR BLEU", "Training Cost"]
+        rows = [header]
+
+        # Look for model names and scores
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # Model names patterns
+            if "Transformer" in line or "ByteNet" in line or "ConvS2S" in line:
+                row = [line]
+                # Look ahead for BLEU scores
+                for j in range(i + 1, min(i + 5, len(lines))):
+                    val = lines[j].strip()
+                    if re.match(r"^[\d\.]+$", val):
+                        row.append(val)
+                if len(row) >= 2:
+                    while len(row) < len(header):
+                        row.append("")
+                    rows.append(row[: len(header)])
+
+            i += 1
+
+        return rows if len(rows) > 1 else None
+
+    @classmethod
+    def _parse_attention_table_1(cls, lines: List[str]) -> Optional[List[List[str]]]:
+        """Parse Table 1 (complexity) from Attention paper."""
+        header = ["Layer Type", "Complexity", "Sequential", "Max Path"]
+        rows = [header]
+
+        # Look for layer type patterns
+        layer_types = ["Self-Attention", "Recurrent", "Convolutional"]
+
+        for i, line in enumerate(lines):
+            for layer in layer_types:
+                if layer in line:
+                    row = [layer]
+                    # Look for O(...) patterns following
+                    for j in range(i, min(i + 5, len(lines))):
+                        if "O(" in lines[j]:
+                            row.append(lines[j].strip())
+                    if len(row) >= 2:
+                        while len(row) < len(header):
+                            row.append("")
+                        rows.append(row[: len(header)])
+                    break
+
+        return rows if len(rows) > 1 else None
+
+    @classmethod
+    def _parse_generic_vertical_table(cls, lines: List[str]) -> Optional[List[List[str]]]:
+        """Generic parser for vertical table format."""
+        # Count numeric values to estimate table dimensions
+        numeric_lines = [line for line in lines if re.match(r"^[\d\.]+[KM]?$", line.strip())]
+
+        if len(numeric_lines) < 4:
+            return None
+
+        # Try to detect number of columns by finding repeating patterns
+        # For now, just return None for generic tables
+        return None
+
+    @classmethod
+    def _parse_horizontal_table(cls, content: str) -> Optional[List[List[str]]]:
+        """Parse table where each row is on a single line."""
+        lines = [line.strip() for line in content.split("\n") if line.strip()]
+
+        if len(lines) < 2:
+            return None
+
+        rows = []
+        for line in lines:
+            # Skip prose
+            if len(line) > 100:
+                continue
+
+            tokens = line.split()
+            if len(tokens) >= 2 and len(tokens) <= 15:
+                # Check for numeric content
+                has_numbers = any(re.match(r"^[\d\.]+$", t) for t in tokens)
+                if has_numbers or len(rows) == 0:  # First row might be header
+                    rows.append(tokens)
+
+        if len(rows) < 2:
+            return None
+
+        # Normalize column count
+        max_cols = max(len(row) for row in rows)
+        normalized = []
+        for row in rows:
+            while len(row) < max_cols:
+                row.append("")
+            normalized.append(row[:max_cols])
+
+        return normalized
 
 
 @dataclass
@@ -143,12 +430,36 @@ class PDFConverter:
             extracted_authors = metadata.get("authors", [])
             logger.info(f"Extracted title: {extracted_title}, authors: {extracted_authors}")
 
-            # Step 3: Analyze and extract from PDF (with formula exclusions)
-            logger.info("Step 3: Analyzing and extracting PDF...")
+            # Step 3: Extract tables as images (before text extraction to get exclusion regions)
+            logger.info("Step 3: Extracting tables as images...")
+            table_dir = temp_dir / "tables"
+            table_images = self.pdf_parser.extract_tables_as_images(input_path, table_dir)
+            if table_images:
+                logger.info(f"Extracted {len(table_images)} table images")
+
+            # Step 4: Analyze and extract from PDF (with formula and table exclusions)
+            logger.info("Step 4: Analyzing and extracting PDF...")
+
+            # Combine formula and table regions to exclude from text extraction
+            exclude_regions = []
+            if formula_images:
+                exclude_regions.extend(formula_images)
+            if table_images:
+                # Convert table images to exclusion format (page is 0-indexed internally)
+                for table_img in table_images:
+                    exclude_regions.append(
+                        {
+                            "page": table_img["page"] - 1,  # Convert to 0-indexed
+                            "bbox": table_img["bbox"],
+                            "img_path": str(table_img["img_path"]),
+                            "type": "table",
+                        }
+                    )
+
             pdf_result = self.pdf_parser.parse(
                 input_path,
                 temp_dir,
-                exclude_regions=formula_images if formula_images else None,
+                exclude_regions=exclude_regions if exclude_regions else None,
             )
             analysis = pdf_result["analysis"]
 
@@ -158,6 +469,7 @@ class PDFConverter:
                 "needs_ocr": analysis["needs_ocr"],
                 "is_two_column": analysis.get("column_layout", {}).get("is_two_column", False),
                 "formula_images": len(formula_images),
+                "table_images": len(table_images),
             }
 
             logger.info(
@@ -165,29 +477,31 @@ class PDFConverter:
                 f"{stats['images']} images, "
                 f"OCR needed: {stats['needs_ocr']}, "
                 f"Two-column: {stats['is_two_column']}, "
-                f"Formula images: {stats['formula_images']}"
+                f"Formula images: {stats['formula_images']}, "
+                f"Table images: {stats['table_images']}"
             )
 
-            # Step 4: Extract and optimize images
-            logger.info("Step 4: Optimizing images...")
+            # Step 5: Extract and optimize images
+            logger.info("Step 5: Optimizing images...")
             optimized_images = self._optimize_images(
                 pdf_result.get("images", []),
                 temp_dir / "optimized_images",
             )
             stats["optimized_images"] = len(optimized_images)
 
-            # Step 5: Create chapters
-            logger.info("Step 5: Creating chapters...")
+            # Step 6: Create chapters
+            logger.info("Step 6: Creating chapters...")
             pages = pdf_result.get("pages", [])
             chapters = self._create_chapters(pages, optimized_images, formula_images)
             stats["chapters"] = len(chapters)
 
-            # Step 6: Build PDF
-            logger.info("Step 6: Building PDF...")
+            # Step 7: Build PDF
+            logger.info("Step 7: Building PDF...")
             pdf_path = self._build_pdf(
                 chapters,
                 optimized_images,
                 formula_images,
+                table_images,
                 output_path,
                 options,
                 input_path,
@@ -372,6 +686,134 @@ class PDFConverter:
 
         return chapters
 
+    def _format_table_text(self, content: str) -> str:
+        """
+        Format table-like text patterns for better readability.
+
+        Scientific papers often have tables where PDF extraction produces
+        values one per line. This method detects such patterns and formats
+        them into readable rows.
+
+        Args:
+            content: Text content that may contain table-like patterns
+
+        Returns:
+            Formatted text with table sections marked with [TABLE_TEXT] tags
+        """
+        lines = content.split("\n")
+        result_lines = []
+
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # Detect start of table (Table N: caption)
+            table_match = re.match(r"^Table\s+\d+[:\.]", line)
+            if table_match:
+                # Collect table caption (may span multiple lines)
+                caption_lines = [line]
+                i += 1
+
+                # Collect lines until we see short single-value lines (table data)
+                while i < len(lines) and len(lines[i].strip()) > 15:
+                    caption_lines.append(lines[i].strip())
+                    i += 1
+
+                # Now collect the table data (short values, one per line)
+                table_values = []
+                while i < len(lines):
+                    val = lines[i].strip()
+
+                    # Stop at prose lines (long text with spaces)
+                    if len(val) > 30 and " " in val and not re.match(r"^[\d\.]+$", val):
+                        # Check if this might be the continuation text after table
+                        if re.match(r"^[A-Z]", val) or re.match(r"^\d+\.\s+[A-Z]", val):
+                            break
+
+                    if val:
+                        table_values.append(val)
+                    i += 1
+
+                # Format the table data into rows
+                if table_values:
+                    # Add caption
+                    result_lines.append(" ".join(caption_lines))
+                    result_lines.append("")  # Blank line
+
+                    # Format table values into rows
+                    # Detect header row (look for common patterns like N, dmodel, etc.)
+                    formatted_rows = self._format_table_values(table_values)
+                    result_lines.extend(formatted_rows)
+                    result_lines.append("")  # Blank line after table
+                else:
+                    result_lines.extend(caption_lines)
+
+                continue
+
+            result_lines.append(lines[i])
+            i += 1
+
+        return "\n".join(result_lines)
+
+    def _format_table_values(self, values: List[str]) -> List[str]:
+        """
+        Format a list of table values into readable rows.
+
+        Args:
+            values: List of individual cell values
+
+        Returns:
+            List of formatted row strings
+        """
+        if not values:
+            return []
+
+        # Try to detect the number of columns
+        # Look for patterns: row labels like "base", "(A)", "(B)", "big"
+        row_markers = ["base", "big", "(A)", "(B)", "(C)", "(D)", "(E)"]
+
+        # Count how many row markers we find
+        marker_positions = []
+        for i, v in enumerate(values):
+            if v in row_markers:
+                marker_positions.append(i)
+
+        if len(marker_positions) >= 2:
+            # Calculate columns from distance between markers
+            distances = [
+                marker_positions[i + 1] - marker_positions[i]
+                for i in range(len(marker_positions) - 1)
+            ]
+            if distances:
+                # Use median distance as column count
+                num_cols = sorted(distances)[len(distances) // 2]
+        else:
+            # Default: try to detect from value patterns
+            # Count numeric vs text values to estimate structure
+            num_cols = 12  # Default for scientific tables
+
+        # Group values into rows
+        rows = []
+        current_row = []
+
+        for v in values:
+            current_row.append(v)
+
+            # Start new row at markers or when row is full
+            if v in row_markers and len(current_row) > 1:
+                # The marker starts a new row
+                rows.append(" | ".join(current_row[:-1]))
+                current_row = [v]
+            elif len(current_row) >= num_cols:
+                rows.append(" | ".join(current_row))
+                current_row = []
+
+        # Add any remaining values
+        if current_row:
+            rows.append(" | ".join(current_row))
+
+        return rows
+
     def _detect_heading_level(self, text: str) -> int:
         """
         Detect if text is a section heading and return its level.
@@ -425,6 +867,7 @@ class PDFConverter:
         chapters: List[Dict],
         optimized_images: List[Dict],
         formula_images: List[Dict],
+        table_images: List[Dict],
         output_path: Path,
         options: ConversionOptions,
         input_path: Path,
@@ -438,6 +881,7 @@ class PDFConverter:
             chapters: List of chapter dicts
             optimized_images: List of image dicts
             formula_images: List of formula image dicts
+            table_images: List of table image dicts (tables rendered as images)
             output_path: Output path for PDF
             options: Conversion options
             input_path: Original input PDF path
@@ -479,8 +923,16 @@ class PDFConverter:
             else:
                 images_without_figure.append(img)
 
-        # Track which figures have been inserted
+        # Build table image lookup by table number
+        tables_by_num: Dict[int, Dict] = {}
+        for table_img in table_images:
+            table_num = table_img.get("table_num")
+            if table_num is not None:
+                tables_by_num[table_num] = table_img
+
+        # Track which figures and tables have been inserted
         inserted_figures: set = set()
+        inserted_tables: set = set()
 
         # Pattern to detect figure references like "Figure 1", "Fig. 2", "Figure 3a"
         figure_ref_pattern = re.compile(r"\b(?:Figure|Fig\.?)\s*(\d+)", re.IGNORECASE)
@@ -499,6 +951,11 @@ class PDFConverter:
 
             # Add content paragraph by paragraph
             content = chapter.get("content", "")
+
+            # Note: Table text formatting disabled - tables are now rendered as images
+            # content = self._format_table_text(content)
+            detected_tables = []
+
             paragraphs = content.split("\n\n")
 
             # For references section, number each entry
@@ -508,6 +965,28 @@ class PDFConverter:
                 para = para.strip()
                 if not para:
                     continue
+
+                # Check for table placeholders and insert formatted tables
+                table_placeholder_match = re.search(r"\[TABLE_PLACEHOLDER:(\d+)\]", para)
+                if table_placeholder_match:
+                    table_idx = int(table_placeholder_match.group(1))
+                    if table_idx < len(detected_tables):
+                        table_info = detected_tables[table_idx]
+                        try:
+                            builder.add_table(
+                                table_info["data"],
+                                caption=table_info.get("caption"),
+                                header_row=True,
+                            )
+                            logger.info(
+                                f"Inserted detected table: {table_info.get('caption', 'unnamed')}"
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to add detected table: {e}")
+                    # Remove placeholder from paragraph
+                    para = re.sub(r"\[TABLE_PLACEHOLDER:\d+\]", "", para).strip()
+                    if not para:
+                        continue
 
                 # Check for formula placeholders in the text
                 if "[FORMULA_IMAGE:" in para:
@@ -554,20 +1033,43 @@ class PDFConverter:
                         except Exception as e:
                             logger.warning(f"Failed to add Figure {fig_num}: {e}")
 
-                # Check for table references and insert table at first mention
+                # Check for table references and insert table image at first mention
                 table_ref_pattern = re.compile(r"\b(?:Table)\s*(\d+)", re.IGNORECASE)
                 table_matches = table_ref_pattern.findall(para)
                 for table_num_str in table_matches:
                     table_num = int(table_num_str)
-                    # Find table in chapter tables
-                    chapter_tables = chapter.get("tables", [])
-                    if table_num <= len(chapter_tables):
-                        table_info = chapter_tables[table_num - 1]
-                        try:
-                            builder.add_table(table_info["data"], caption=f"Table {table_num}")
-                            logger.debug(f"Inserted Table {table_num} inline")
-                        except Exception as e:
-                            logger.warning(f"Failed to add Table {table_num}: {e}")
+                    if table_num not in inserted_tables:
+                        # Find table image
+                        table_img = tables_by_num.get(table_num)
+                        if table_img:
+                            try:
+                                builder.add_image(
+                                    table_img["img_path"],
+                                    caption=table_img.get("caption", f"Table {table_num}"),
+                                )
+                                inserted_tables.add(table_num)
+                                logger.info(f"Inserted Table {table_num} as image")
+                            except Exception as e:
+                                logger.warning(f"Failed to add Table {table_num} image: {e}")
+
+        # Add any remaining tables that weren't referenced in text
+        remaining_tables = [
+            table_img
+            for table_num, table_img in tables_by_num.items()
+            if table_num not in inserted_tables
+        ]
+        if remaining_tables:
+            # Sort by table number
+            remaining_tables.sort(key=lambda t: t.get("table_num", 0))
+            for table_img in remaining_tables:
+                try:
+                    builder.add_image(
+                        table_img["img_path"],
+                        caption=table_img.get("caption", f"Table {table_img.get('table_num')}"),
+                    )
+                    logger.info(f"Inserted remaining Table {table_img.get('table_num')} as image")
+                except Exception as e:
+                    logger.warning(f"Failed to add remaining table image: {e}")
 
         # Add any remaining images that weren't referenced
         remaining_images = [

@@ -737,6 +737,173 @@ class PDFParser:
         logger.info(f"Extracted {table_count} tables from {len(tables_by_page)} pages")
         return tables_by_page
 
+    def extract_tables_as_images(self, pdf_path: Path, output_dir: Path) -> List[Dict]:
+        """
+        Extract tables from PDF as images by detecting "Table N:" markers.
+
+        This method finds table captions and extracts the table region
+        as a high-quality image, which renders much better than trying
+        to parse table structure.
+
+        Args:
+            pdf_path: Path to PDF file
+            output_dir: Directory to save table images
+
+        Returns:
+            List of dicts with:
+            - page: page number (1-indexed)
+            - table_num: table number (e.g., 1, 2, 3)
+            - caption: table caption text
+            - img_path: path to extracted image
+            - bbox: bounding box coordinates
+        """
+        logger.info(f"Extracting tables as images from: {pdf_path}")
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        doc = fitz.open(pdf_path)
+        results = []
+
+        # Track which tables we've already extracted (avoid duplicates)
+        extracted_tables = set()
+
+        # Find all "Table N:" text locations
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            text = page.get_text()
+
+            # Find table markers - only match actual table captions with colon
+            # "Table N:" indicates a caption, while "Table N." or "Table N " is a reference
+            import re
+
+            table_pattern = re.compile(r"Table\s+(\d+):\s*[A-Z]")
+
+            for match in table_pattern.finditer(text):
+                table_num = int(match.group(1))
+
+                # Skip if we already extracted this table number
+                if table_num in extracted_tables:
+                    continue
+
+                # Search for the exact table caption location (with colon)
+                text_instances = page.search_for(f"Table {table_num}:")
+                if not text_instances:
+                    # Try without colon as fallback
+                    text_instances = page.search_for(f"Table {table_num}")
+                if not text_instances:
+                    continue
+
+                # Get the position of the table marker
+                table_rect = text_instances[0]
+
+                # Find the extent of the table by looking for the next major text block
+                # or the bottom of the page
+                blocks = page.get_text("dict")["blocks"]
+
+                # Find the table start (at or below "Table N:")
+                table_top = table_rect.y0 - 5  # Slight margin above
+
+                # Find where the table ends
+                # Look for blocks that start after the table marker
+                # and find where prose text resumes
+                table_bottom = table_top + 300  # Default extent
+
+                # Sort blocks by vertical position
+                text_blocks = [b for b in blocks if b.get("type") == 0]
+                text_blocks.sort(key=lambda b: b["bbox"][1])
+
+                # Find blocks below the table header
+                in_table = False
+                prev_block_bottom = table_top
+
+                for block in text_blocks:
+                    block_top = block["bbox"][1]
+                    block_bottom = block["bbox"][3]
+
+                    if block_top >= table_top:
+                        if not in_table:
+                            in_table = True
+
+                        # Check if this block looks like prose (wide, text)
+                        # Tables tend to have narrow blocks or structured layout
+                        block_text = ""
+                        for line in block.get("lines", []):
+                            for span in line.get("spans", []):
+                                block_text += span.get("text", "")
+
+                        # If we see a new section or paragraph start after table data
+                        is_new_section = (
+                            block_text.strip().startswith(
+                                ("In Table", "We ", "The ", "This ", "For ", "As ")
+                            )
+                            or re.match(r"^\d+\.\s+[A-Z]", block_text.strip())
+                            or re.match(r"^\d+\s+[A-Z][a-z]", block_text.strip())
+                        )
+
+                        if is_new_section and block_top > table_top + 50:
+                            table_bottom = block_top - 5
+                            break
+
+                        # Check for large gap indicating end of table
+                        if block_top - prev_block_bottom > 40 and in_table:
+                            if block_top > table_top + 100:
+                                table_bottom = prev_block_bottom + 10
+                                break
+
+                        prev_block_bottom = block_bottom
+
+                # Set reasonable bounds
+                table_bottom = min(table_bottom, page.rect.height - 20)
+                table_bottom = max(table_bottom, table_top + 100)
+
+                # Extract the table region as an image
+                # Include full page width to capture the entire table
+                clip = fitz.Rect(
+                    20,  # Left margin
+                    table_top,
+                    page.rect.width - 20,  # Right margin
+                    table_bottom,
+                )
+                clip.intersect(page.rect)
+
+                # High quality rendering
+                zoom = 2.5
+                mat = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat, clip=clip)
+
+                # Save the image
+                img_name = f"table_{table_num}_p{page_num + 1}.png"
+                img_path = output_dir / img_name
+                pix.save(str(img_path))
+
+                # Get caption text
+                caption_text = f"Table {table_num}"
+                # Try to extract full caption
+                caption_match = re.search(rf"Table\s+{table_num}[:\.]?\s*([^\n]+)", text)
+                if caption_match:
+                    caption_text = f"Table {table_num}: {caption_match.group(1).strip()}"
+
+                results.append(
+                    {
+                        "page": page_num + 1,
+                        "table_num": table_num,
+                        "caption": caption_text,
+                        "img_path": img_path,
+                        "bbox": (clip.x0, clip.y0, clip.x1, clip.y1),
+                        "width": pix.width,
+                        "height": pix.height,
+                    }
+                )
+
+                # Mark this table as extracted to avoid duplicates
+                extracted_tables.add(table_num)
+                logger.info(f"Extracted table {table_num} from page {page_num + 1} as image")
+
+        doc.close()
+        logger.info(f"Extracted {len(results)} table images")
+        return results
+
     def extract_text_column_aware(self, pdf_path: Path) -> List[Dict]:
         """
         Extract text with automatic column detection and reordering.
