@@ -252,7 +252,7 @@ def convert(
                     latex_dir=latex_dir,
                     main_tex_file=main_tex_file,
                     output_path=output_path,
-                    font_size=14,
+                    font_size=12,
                     title=title,
                     authors=list(author) if author else None,
                     render_tables_as_images=True,
