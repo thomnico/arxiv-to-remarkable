@@ -988,18 +988,44 @@ class PDFConverter:
                     if not para:
                         continue
 
-                # Check for formula placeholders in the text
+                # Check for formula/table placeholders in the text
+                # (Both formulas and tables use FORMULA_IMAGE markers from text extraction)
                 if "[FORMULA_IMAGE:" in para:
                     placeholder_match = re.search(r"\[FORMULA_IMAGE:([^:]+):page(\d+)\]", para)
                     if placeholder_match:
                         img_name = placeholder_match.group(1)
+                        image_found = False
+
+                        # First check formula_images
                         for formula in formula_images:
                             if Path(formula.get("img_path", "")).name == img_name:
                                 try:
                                     builder.add_image(formula["img_path"])
+                                    image_found = True
                                 except Exception as e:
                                     logger.warning(f"Failed to add formula image: {e}")
                                 break
+
+                        # If not in formulas, check if it's a table image
+                        if not image_found and img_name.startswith("table_"):
+                            for table_img in table_images:
+                                if Path(table_img.get("img_path", "")).name == img_name:
+                                    try:
+                                        table_num = table_img.get("table_num")
+                                        builder.add_image(
+                                            table_img["img_path"],
+                                            caption=table_img.get("caption", f"Table {table_num}"),
+                                        )
+                                        if table_num is not None:
+                                            inserted_tables.add(table_num)
+                                        logger.info(
+                                            f"Inserted Table {table_num} at placeholder location"
+                                        )
+                                        image_found = True
+                                    except Exception as e:
+                                        logger.warning(f"Failed to add table image: {e}")
+                                    break
+
                         para = re.sub(r"\[FORMULA_IMAGE:[^\]]+\]", "", para).strip()
                         if not para:
                             continue
