@@ -30,6 +30,65 @@ from reportlab.platypus.flowables import Flowable
 
 logger = logging.getLogger(__name__)
 
+# Mathematical symbols that OpenDyslexic doesn't support - need fallback font
+# These are common in scientific papers
+MATH_SYMBOL_RANGES = [
+    (0x0370, 0x03FF),  # Greek letters (α, β, γ, etc.)
+    (0x2190, 0x21FF),  # Arrows (→, ←, ↔, etc.)
+    (0x2200, 0x22FF),  # Mathematical operators (∀, ∃, ∈, ∉, etc.)
+    (0x2300, 0x23FF),  # Miscellaneous technical
+    (0x27C0, 0x27EF),  # Miscellaneous mathematical symbols-A
+    (0x2980, 0x29FF),  # Miscellaneous mathematical symbols-B
+    (0x2A00, 0x2AFF),  # Supplemental mathematical operators
+]
+
+# Specific symbols OpenDyslexic is missing (verified by testing)
+MISSING_IN_OPENDYSLEXIC = {
+    0x22A4,  # ⊤ (down tack / transpose)
+    0x22A5,  # ⊥ (up tack / perpendicular)
+    0x2208,  # ∈ (element of)
+    0x2209,  # ∉ (not element of)
+    0x2192,  # → (right arrow)
+    0x2190,  # ← (left arrow)
+    0x2194,  # ↔ (left-right arrow)
+    0x21D2,  # ⇒ (double right arrow)
+    0x21D0,  # ⇐ (double left arrow)
+    0x21D4,  # ⇔ (double left-right arrow)
+    0x2202,  # ∂ (partial derivative)
+    0x2207,  # ∇ (nabla)
+    0x2205,  # ∅ (empty set)
+    0x2229,  # ∩ (intersection)
+    0x222A,  # ∪ (union)
+    0x2282,  # ⊂ (subset)
+    0x2283,  # ⊃ (superset)
+    0x2286,  # ⊆ (subset or equal)
+    0x2287,  # ⊇ (superset or equal)
+    0x2227,  # ∧ (logical and)
+    0x2228,  # ∨ (logical or)
+    0x00AC,  # ¬ (not sign)
+    0x2234,  # ∴ (therefore)
+    0x2235,  # ∵ (because)
+    0x22C5,  # ⋅ (dot operator)
+    0x2295,  # ⊕ (circled plus)
+    0x2297,  # ⊗ (circled times)
+}
+
+# All Greek letters (OpenDyslexic is missing these)
+GREEK_LETTERS = set(range(0x0391, 0x03C9 + 1))  # Α-ω
+
+
+def _needs_math_font(char: str) -> bool:
+    """Check if a character needs a math fallback font."""
+    code = ord(char)
+    # Check specific missing symbols
+    if code in MISSING_IN_OPENDYSLEXIC or code in GREEK_LETTERS:
+        return True
+    # Check ranges (excluding what OpenDyslexic has)
+    for start, end in MATH_SYMBOL_RANGES:
+        if start <= code <= end:
+            return True
+    return False
+
 
 class BookmarkFlowable(Flowable):
     """Invisible flowable that adds a bookmark at the current position."""
@@ -154,7 +213,7 @@ class PDFBuilder:
         self._styles = self._create_styles()
 
     def _register_fonts(self):
-        """Register OpenDyslexic fonts with reportlab."""
+        """Register OpenDyslexic fonts and math fallback font with reportlab."""
         if self._fonts_registered:
             return
 
@@ -195,9 +254,46 @@ class PDFBuilder:
             self._fonts_registered = True
             logger.info("OpenDyslexic fonts registered successfully")
 
+            # Register math fallback font (STIX has excellent math symbol coverage)
+            self._math_font_registered = False
+            self._register_math_font()
+
         except Exception as e:
             logger.warning(f"Failed to register OpenDyslexic fonts: {e}")
             self.config.use_opendyslexic = False
+
+    def _register_math_font(self):
+        """Register a math-capable fallback font for symbols OpenDyslexic lacks."""
+        # Try system fonts with good math coverage
+        # TTF only - OTF with PostScript outlines not supported by ReportLab
+        math_font_paths = [
+            # macOS - Apple Symbols has excellent math coverage
+            Path("/System/Library/Fonts/Apple Symbols.ttf"),
+            Path("/System/Library/Fonts/Symbol.ttf"),
+            # STIX TTF variant (not OTF - those have PostScript outlines)
+            Path("/System/Library/Fonts/Supplemental/STIXTwoText.ttf"),
+            # Linux common locations
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            Path("/usr/share/fonts/truetype/freefont/FreeSans.ttf"),
+            Path("/usr/share/fonts/TTF/DejaVuSans.ttf"),
+            # Windows
+            Path("C:/Windows/Fonts/cambria.ttf"),
+            Path("C:/Windows/Fonts/arial.ttf"),
+        ]
+
+        for font_path in math_font_paths:
+            if font_path.exists():
+                try:
+                    pdfmetrics.registerFont(TTFont("MathFont", str(font_path)))
+                    self._math_font_registered = True
+                    logger.info(f"Registered math fallback font: {font_path.name}")
+                    return
+                except Exception as e:
+                    logger.debug(f"Failed to register {font_path}: {e}")
+                    continue
+
+        logger.warning("No math fallback font found - some symbols may not render")
+        self._math_font_registered = False
 
     def _create_styles(self) -> Dict[str, ParagraphStyle]:
         """Create paragraph styles for the document."""
@@ -514,7 +610,67 @@ class PDFBuilder:
             text = re.sub(r"\s+", " ", text)
 
         text = text.strip()
+
+        # Wrap math symbols in fallback font tags (if math font is registered)
+        if self.config.use_opendyslexic and getattr(self, "_math_font_registered", False):
+            text = self._wrap_math_symbols(text)
+
         return text
+
+    def _wrap_math_symbols(self, text: str) -> str:
+        """
+        Wrap mathematical symbols in <font> tags to use the math fallback font.
+
+        OpenDyslexic lacks many mathematical symbols (Greek letters, arrows,
+        set operators, etc.). This method wraps those symbols with
+        <font name="MathFont">...</font> so they render correctly.
+
+        Args:
+            text: Text that may contain math symbols
+
+        Returns:
+            Text with math symbols wrapped in font tags
+        """
+        if not text:
+            return text
+
+        result = []
+        math_buffer = []
+        in_tag = False
+        i = 0
+
+        while i < len(text):
+            char = text[i]
+
+            # Track when we're inside XML tags to avoid modifying them
+            if char == "<":
+                # Flush math buffer before tag
+                if math_buffer:
+                    result.append(f'<font name="MathFont">{"".join(math_buffer)}</font>')
+                    math_buffer = []
+                in_tag = True
+                result.append(char)
+            elif char == ">":
+                in_tag = False
+                result.append(char)
+            elif in_tag:
+                result.append(char)
+            elif _needs_math_font(char):
+                math_buffer.append(char)
+            else:
+                # Flush any pending math symbols
+                if math_buffer:
+                    result.append(f'<font name="MathFont">{"".join(math_buffer)}</font>')
+                    math_buffer = []
+                result.append(char)
+
+            i += 1
+
+        # Flush remaining math buffer
+        if math_buffer:
+            result.append(f'<font name="MathFont">{"".join(math_buffer)}</font>')
+
+        return "".join(result)
 
     def _detect_heading_level(self, text: str) -> Optional[int]:
         """Detect if text is a heading and its level."""
