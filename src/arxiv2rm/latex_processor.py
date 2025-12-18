@@ -1194,6 +1194,15 @@ class LaTeXProcessor:
 
         # Try as-is if it has an extension
         if any(image_path.lower().endswith(ext) for ext in self.IMAGE_EXTENSIONS):
+            # For PDF figures, prefer raster alternatives (PNG/JPG) since
+            # PDF images cannot be rendered directly by PIL/reportlab
+            if image_path.lower().endswith(".pdf"):
+                base_without_ext = image_path[:-4]
+                for alt_ext in [".png", ".jpg", ".jpeg"]:
+                    alt_candidate = self.latex_dir / (base_without_ext + alt_ext)
+                    if alt_candidate.exists():
+                        return alt_candidate
+            # Fall back to original path if no alternative exists
             candidate = self.latex_dir / image_path
             if candidate.exists():
                 return candidate
