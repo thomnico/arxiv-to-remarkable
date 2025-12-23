@@ -11,6 +11,7 @@ Main conversion pipeline that orchestrates:
 import logging
 import re
 import shutil
+import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -341,7 +342,7 @@ class ConversionOptions:
 
     # PDF settings
     include_title_page: bool = True
-    font_size: int = 14  # 12, 14, 16, or 18
+    font_size: int = 12  # 12, 14, 16, or 18
 
     # Processing settings
     temp_dir: Optional[Path] = None
@@ -489,10 +490,12 @@ class PDFConverter:
             )
             stats["optimized_images"] = len(optimized_images)
 
-            # Step 6: Create chapters
+            # Step 6: Create chapters (filters references/acknowledgements, adds executive summary)
             logger.info("Step 6: Creating chapters...")
             pages = pdf_result.get("pages", [])
-            chapters = self._create_chapters(pages, optimized_images, formula_images)
+            chapters = self._create_chapters(
+                pages, optimized_images, formula_images, paper_title=extracted_title or ""
+            )
             stats["chapters"] = len(chapters)
 
             # Step 7: Build PDF
@@ -595,18 +598,24 @@ class PDFConverter:
         pages: List[Dict],
         optimized_images: List[Dict],
         formula_images: Optional[List[Dict]] = None,
+        paper_title: str = "",
     ) -> List[Dict]:
         """
         Create chapter structure from extracted pages.
 
         Args:
             pages: List of page dicts with text content
-            optimized_images: List of image dicts
-            formula_images: List of formula image dicts
+            optimized_images: List of image dicts (unused, kept for API compatibility)
+            formula_images: List of formula image dicts (unused, kept for API compatibility)
+            paper_title: Title of the paper for summary generation
 
         Returns:
             List of chapter dicts with title, content, and tables
         """
+        # Suppress unused parameter warnings
+        _ = optimized_images
+        _ = formula_images
+
         if not pages:
             return [{"title": "Content", "content": "No content available.", "tables": []}]
 
@@ -627,17 +636,48 @@ class PDFConverter:
         chapters = self._detect_chapters(all_text)
 
         if not chapters:
-            return [{"title": "Content", "content": all_text, "tables": all_tables}]
+            chapters = [{"title": "Content", "content": all_text, "tables": all_tables}]
 
-        # Distribute tables to chapters (simplified: add all to first chapter)
-        # TODO: Better table-to-chapter mapping based on page numbers
-        if chapters and all_tables:
-            chapters[0]["tables"] = all_tables
+        # Filter out excluded sections (references, acknowledgements, etc.)
+        filtered_chapters = []
         for ch in chapters:
+            title = ch.get("title", "")
+            if not self._is_excluded_section(title):
+                filtered_chapters.append(ch)
+            else:
+                logger.info(f"Excluding section: {title}")
+
+        # If all chapters were filtered, keep the main content
+        if not filtered_chapters and chapters:
+            filtered_chapters = [ch for ch in chapters if ch.get("title", "").lower() == "content"]
+            if not filtered_chapters:
+                filtered_chapters = [chapters[0]]
+
+        # Generate executive summary from main content
+        main_content = "\n\n".join(ch.get("content", "") for ch in filtered_chapters)
+        if main_content.strip():
+            logger.info("Generating executive summary...")
+            summary = self._generate_executive_summary(main_content, paper_title)
+            summary_chapter = {
+                "title": "Executive Summary",
+                "content": summary,
+                "tables": [],
+            }
+            # Insert summary at the beginning
+            filtered_chapters.insert(0, summary_chapter)
+
+        # Distribute tables to first content chapter (after summary)
+        content_chapters = [
+            ch for ch in filtered_chapters if ch.get("title") != "Executive Summary"
+        ]
+        if content_chapters and all_tables:
+            content_chapters[0]["tables"] = all_tables
+
+        for ch in filtered_chapters:
             if "tables" not in ch:
                 ch["tables"] = []
 
-        return chapters
+        return filtered_chapters
 
     def _detect_chapters(self, text: str) -> List[Dict]:
         """
@@ -664,10 +704,15 @@ class PDFConverter:
             heading_level = self._detect_heading_level(line_stripped)
 
             if heading_level > 0 and heading_level <= 2:
-                # Save previous chapter
+                # Save previous chapter or content before first heading
                 if current_title:
                     content = "\n".join(current_content)
                     chapters.append({"title": current_title, "content": content})
+                elif current_content:
+                    # Content before the first heading - save as main content
+                    content = "\n".join(current_content)
+                    if content.strip():
+                        chapters.append({"title": "Content", "content": content})
 
                 # Start new chapter
                 current_title = line_stripped
@@ -685,6 +730,149 @@ class PDFConverter:
             chapters.append({"title": "Content", "content": content})
 
         return chapters
+
+    # Sections to exclude from output (references, acknowledgements, etc.)
+    EXCLUDED_SECTIONS = {
+        "acknowledgments",
+        "acknowledgements",
+        "acknowledgment",
+        "acknowledgement",
+        "references",
+        "bibliography",
+        "works cited",
+        "literature cited",
+        "funding",
+        "author contributions",
+        "competing interests",
+        "conflict of interest",
+        "data availability",
+        "supplementary material",
+        "supplementary information",
+        "appendix",
+        "appendices",
+    }
+
+    def _is_excluded_section(self, title: str) -> bool:
+        """Check if a section title should be excluded from output."""
+        title_lower = title.lower().strip()
+        # Check exact match
+        if title_lower in self.EXCLUDED_SECTIONS:
+            return True
+        # Check if title starts with excluded section name
+        for excluded in self.EXCLUDED_SECTIONS:
+            if title_lower.startswith(excluded):
+                return True
+        return False
+
+    def _generate_executive_summary(self, content: str, title: str = "") -> str:
+        """
+        Generate an executive summary using Claude CLI.
+
+        Args:
+            content: The main text content of the paper
+            title: Optional paper title
+
+        Returns:
+            Executive summary text (3 paragraphs)
+        """
+        # Limit content to avoid token limits
+        max_content = 12000
+        content_sample = content[:max_content] if len(content) > max_content else content
+
+        prompt = f"""Analyze this scientific paper and write an executive summary in 3 paragraphs.
+
+IMPORTANT: Output PLAIN TEXT only. Do NOT use markdown formatting (no **, no ## , no bullets).
+
+Format your response exactly like this (with blank lines between sections):
+
+MAIN FINDINGS
+[Your paragraph about what this paper proves or demonstrates, key claims and evidence]
+
+LIMITATIONS
+[Your paragraph about limitations, caveats, or areas where conclusions may not apply]
+
+KEY INSIGHTS
+[Your paragraph about actionable knowledge the reader can take away, practical significance]
+
+Paper title: {title}
+
+Paper content:
+{content_sample}
+
+Write the 3 paragraphs now. Plain text only, no markdown."""
+
+        try:
+            # Call Claude CLI
+            result = subprocess.run(
+                ["claude", "-p", prompt],
+                capture_output=True,
+                text=True,
+                timeout=120,  # 2 minute timeout
+            )
+
+            if result.returncode == 0 and result.stdout.strip():
+                summary = result.stdout.strip()
+                # Strip any markdown formatting that Claude may have included
+                summary = self._strip_markdown(summary)
+                logger.info("Generated executive summary using Claude CLI")
+                return summary
+            else:
+                logger.warning(f"Claude CLI returned no output or error: {result.stderr}")
+                return self._generate_fallback_summary(content, title)
+
+        except subprocess.TimeoutExpired:
+            logger.warning("Claude CLI timed out, using fallback summary")
+            return self._generate_fallback_summary(content, title)
+        except FileNotFoundError:
+            logger.warning("Claude CLI not found, using fallback summary")
+            return self._generate_fallback_summary(content, title)
+        except Exception as e:
+            logger.warning(f"Error calling Claude CLI: {e}, using fallback summary")
+            return self._generate_fallback_summary(content, title)
+
+    def _strip_markdown(self, text: str) -> str:
+        """Strip markdown formatting from text."""
+        # Remove headers (# ## ### etc.)
+        text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+        # Remove bold (**text** or __text__)
+        text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+        text = re.sub(r"__([^_]+)__", r"\1", text)
+        # Remove italic (*text* or _text_) - be careful not to affect underscores in words
+        text = re.sub(r"(?<!\w)\*([^*]+)\*(?!\w)", r"\1", text)
+        # Remove bullet points
+        text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)
+        # Remove numbered lists formatting
+        text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.MULTILINE)
+        # Remove inline code backticks
+        text = re.sub(r"`([^`]+)`", r"\1", text)
+        # Remove links [text](url) -> text
+        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+        return text
+
+    def _generate_fallback_summary(self, content: str, title: str = "") -> str:
+        """Generate a basic fallback summary when Claude CLI is unavailable."""
+        # Extract abstract if present
+        abstract_pattern = (
+            r"(?:Abstract|ABSTRACT)[:\s]*\n?(.*?)"
+            r"(?=\n\s*(?:Introduction|INTRODUCTION|I\.\s|1\.\s|\n\n[A-Z]))"
+        )
+        abstract_match = re.search(abstract_pattern, content, re.DOTALL | re.IGNORECASE)
+
+        title_prefix = f"Paper: {title}\n\n" if title else ""
+        unavailable_msg = "[Claude CLI not accessible]"
+
+        if abstract_match:
+            abstract = abstract_match.group(1).strip()[:1500]
+            return (
+                f"{title_prefix}MAIN FINDINGS:\n{abstract}\n\n"
+                f"LIMITATIONS:\n{unavailable_msg}\n\n"
+                f"KEY INSIGHTS:\nPlease read the full paper for detailed insights."
+            )
+        else:
+            return (
+                f"{title_prefix}[Executive summary unavailable - {unavailable_msg}]\n\n"
+                f"Please read the paper for full content."
+            )
 
     def _format_table_text(self, content: str) -> str:
         """
