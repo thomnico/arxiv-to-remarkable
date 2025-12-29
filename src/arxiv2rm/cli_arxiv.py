@@ -97,7 +97,7 @@ def download_and_convert_arxiv(
                     latex_dir=latex_dir,
                     main_tex_file=main_tex_file,
                     output_path=output_path,
-                    font_size=12,
+                    font_size=10,
                     title=paper_title,
                     authors=paper_authors,
                     render_tables_as_images=True,

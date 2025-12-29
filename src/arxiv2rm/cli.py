@@ -148,7 +148,7 @@ def main(ctx, config_file, log_level):
 @click.option("--format", "output_format", default="pdf", help="Output format (pdf)")
 @click.option("--ocr-engine", default="local", help="OCR engine (local, groq, tesseract)")
 @click.option("--image-quality", type=int, default=85, help="JPEG quality (1-100)")
-@click.option("--font-size", type=int, default=12, help="Font size (10, 12, 14, 16, 18)")
+@click.option("--font-size", type=int, default=10, help="Font size (10, 12, 14, 16, 18)")
 @click.option("--title", help="Override document title")
 @click.option("--author", multiple=True, help="Author name (can be repeated)")
 @click.option("--columns/--no-columns", default=True, help="Enable column detection")
@@ -266,7 +266,7 @@ def convert(
                     latex_dir=latex_dir,
                     main_tex_file=main_tex_file,
                     output_path=output_path,
-                    font_size=12,
+                    font_size=10,
                     title=title,
                     authors=list(author) if author else None,
                     render_tables_as_images=True,

@@ -148,7 +148,7 @@ class PDFBuilderConfig:
     margin_right: float = 54
 
     # Typography - improved for readability
-    font_size: int = 14  # Default, options: 10, 12, 14, 16, 18
+    font_size: int = 10  # Default, options: 10, 12, 14, 16, 18
     line_height_ratio: float = 1.6  # Increased line height for better readability
     paragraph_spacing: float = 12  # Increased space between paragraphs
 
@@ -1125,7 +1125,7 @@ class PDFBuilder:
 def convert_pdf_to_remarkable(
     input_path: Path,
     output_path: Optional[Path] = None,
-    font_size: int = 14,
+    font_size: int = 10,
     extract_formulas: bool = True,
 ) -> Path:
     """
@@ -1587,7 +1587,7 @@ def convert_latex_to_remarkable(
     latex_dir: Path,
     main_tex_file: Path,
     output_path: Optional[Path] = None,
-    font_size: int = 14,
+    font_size: int = 10,
     title: Optional[str] = None,
     authors: Optional[List[str]] = None,
     render_tables_as_images: bool = True,
