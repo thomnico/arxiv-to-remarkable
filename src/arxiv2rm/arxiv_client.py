@@ -22,6 +22,7 @@ class ArxivURLParser:
         r"arxiv\.org/abs/(\d{4}\.\d{4,5}(?:v\d+)?)",  # New format with optional version
         r"arxiv\.org/pdf/(\d{4}\.\d{4,5}(?:v\d+)?)",  # PDF URL
         r"arxiv\.org/abs/([a-z\-]+/\d{7})",  # Old format
+        r"^arxiv:(\d{4}\.\d{4,5}(?:v\d+)?)$",  # arXiv: prefix (case insensitive)
         r"^(\d{4}\.\d{4,5}(?:v\d+)?)$",  # Direct ID (new)
         r"^([a-z\-]+/\d{7})$",  # Direct ID (old)
     ]

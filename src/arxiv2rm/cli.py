@@ -190,16 +190,28 @@ def convert(
             upload = config.remarkable.auto_upload
 
     # Check if input is URL or file path
-    input_path = Path(url_or_path)
-    is_url = url_or_path.startswith(("http://", "https://", "arxiv:"))
+    is_url = url_or_path.startswith(("http://", "https://", "arxiv:", "arXiv:"))
 
+    # Handle ArXiv URLs
     if is_url:
-        console.print(
-            "[yellow]URL download not yet implemented. Please provide a local PDF.[/yellow]"
-        )
-        console.print("[dim]Use: arxiv2rm convert paper.pdf[/dim]")
-        sys.exit(1)
+        from arxiv2rm.cli_arxiv import download_and_convert_arxiv
 
+        success, result_path, error = download_and_convert_arxiv(
+            url_or_id=url_or_path,
+            output_path=Path(output) if output else None,
+            title=title,
+            authors=list(author) if author else None,
+            prefer_latex=True,
+        )
+
+        if success:
+            sys.exit(0)
+        else:
+            console.print(f"[red]Error:[/red] {error}")
+            sys.exit(1)
+
+    # Handle local file path
+    input_path = Path(url_or_path)
     if not input_path.exists():
         console.print(f"[red]Error:[/red] File not found: {url_or_path}")
         sys.exit(1)
