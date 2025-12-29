@@ -148,6 +148,7 @@ def main(ctx, config_file, log_level):
 @click.option("--format", "output_format", default="pdf", help="Output format (pdf)")
 @click.option("--ocr-engine", default="local", help="OCR engine (local, groq, tesseract)")
 @click.option("--image-quality", type=int, default=85, help="JPEG quality (1-100)")
+@click.option("--font-size", type=int, default=12, help="Font size (10, 12, 14, 16, 18)")
 @click.option("--title", help="Override document title")
 @click.option("--author", multiple=True, help="Author name (can be repeated)")
 @click.option("--columns/--no-columns", default=True, help="Enable column detection")
@@ -161,6 +162,7 @@ def convert(
     output_format,
     ocr_engine,
     image_quality,
+    font_size,
     title,
     author,
     columns,
@@ -308,6 +310,7 @@ def convert(
     console.print(f"[dim]Output: {output_path}[/dim]")
     console.print(f"[dim]OCR Engine: {ocr_engine}[/dim]")
     console.print(f"[dim]Image Quality: {image_quality}[/dim]")
+    console.print(f"[dim]Font Size: {font_size}pt[/dim]")
     console.print(f"[dim]Column Detection: {'enabled' if columns else 'disabled'}[/dim]")
 
     # Configure conversion options
@@ -317,6 +320,7 @@ def convert(
         authors=list(author) if author else None,
         optimize_images=True,
         image_quality=image_quality,
+        font_size=font_size,
         device=RemarkableDevice.REMARKABLE_1,
         detect_columns=columns,
         ocr_engine=ocr_engine,

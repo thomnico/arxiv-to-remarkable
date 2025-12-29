@@ -148,7 +148,7 @@ class PDFBuilderConfig:
     margin_right: float = 54
 
     # Typography - improved for readability
-    font_size: int = 14  # Default, options: 12, 14, 16, 18
+    font_size: int = 14  # Default, options: 10, 12, 14, 16, 18
     line_height_ratio: float = 1.6  # Increased line height for better readability
     paragraph_spacing: float = 12  # Increased space between paragraphs
 
@@ -1138,7 +1138,7 @@ def convert_pdf_to_remarkable(
     Args:
         input_path: Path to source PDF
         output_path: Path for output PDF (default: input_remarkable.pdf)
-        font_size: Font size (12, 14, 16, or 18)
+        font_size: Font size (10, 12, 14, 16, or 18)
         extract_formulas: Whether to extract formulas as images
 
     Returns:
@@ -1603,7 +1603,7 @@ def convert_latex_to_remarkable(
         latex_dir: Directory containing LaTeX source files
         main_tex_file: Path to main .tex file
         output_path: Path for output PDF (default: latex_dir/../output.pdf)
-        font_size: Font size (12, 14, 16, or 18)
+        font_size: Font size (10, 12, 14, 16, or 18)
         render_tables_as_images: If True, render tables as images using pdflatex
         render_math_as_images: If True, render display math as images using pdflatex
         title: Override title (default: extracted from LaTeX)

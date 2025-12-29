@@ -342,7 +342,7 @@ class ConversionOptions:
 
     # PDF settings
     include_title_page: bool = True
-    font_size: int = 12  # 12, 14, 16, or 18
+    font_size: int = 12  # 10, 12, 14, 16, or 18
 
     # Processing settings
     temp_dir: Optional[Path] = None
