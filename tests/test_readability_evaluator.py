@@ -153,7 +153,7 @@ class TestReadabilityEvaluator:
         """Test initialization without API key."""
         evaluator = ReadabilityEvaluator(api_key=None)
         assert evaluator.api_key is None
-        assert evaluator.model == "claude-sonnet-4-20250514"
+        assert evaluator.model == "claude-opus-4-5-20251101"
 
     def test_init_with_api_key(self):
         """Test initialization with API key."""

@@ -282,7 +282,7 @@ Respond in JSON format:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "claude-sonnet-4-20250514",
+        model: str = "claude-opus-4-5-20251101",
         cache_dir: Optional[Path] = None,
     ):
         """
@@ -619,6 +619,7 @@ Respond in JSON format:
             response = client.messages.create(
                 model=self.model,
                 max_tokens=1024,
+                effort="high",
                 messages=[
                     {
                         "role": "user",
