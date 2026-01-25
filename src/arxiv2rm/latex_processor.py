@@ -102,6 +102,104 @@ class LaTeXProcessor:
         self.math_counter = 0
         logger.info(f"LaTeX processor initialized: {main_tex_file}")
 
+    @staticmethod
+    def _extract_braced_content(text: str, start_pos: int) -> tuple[str, int]:
+        """
+        Extract content from a LaTeX command argument, handling nested braces.
+
+        Args:
+            text: Full LaTeX text
+            start_pos: Position of the opening brace
+
+        Returns:
+            Tuple of (extracted_content, end_position)
+        """
+        if start_pos >= len(text) or text[start_pos] != "{":
+            return "", start_pos
+
+        depth = 1
+        pos = start_pos + 1
+        while pos < len(text) and depth > 0:
+            if text[pos] == "{" and (pos == 0 or text[pos - 1] != "\\"):
+                depth += 1
+            elif text[pos] == "}" and (pos == 0 or text[pos - 1] != "\\"):
+                depth -= 1
+            pos += 1
+
+        if depth == 0:
+            return text[start_pos + 1 : pos - 1], pos
+        return "", start_pos
+
+    @staticmethod
+    def _find_sections(text: str):
+        """
+        Find section commands in LaTeX text, handling nested braces properly.
+
+        Args:
+            text: LaTeX text to search
+
+        Yields:
+            Match objects with start(), end(), and group(1) for section title
+        """
+        import re
+
+        class SectionMatch:
+            """Match-like object for section extraction."""
+
+            def __init__(self, start_pos, end_pos, title, full_text):
+                self._start = start_pos
+                self._end = end_pos
+                self._title = title
+                self._full = full_text
+
+            def start(self):
+                return self._start
+
+            def end(self):
+                return self._end
+
+            def group(self, n):
+                return self._title if n == 1 else self._full
+
+        # Find all \section{ positions
+        pattern = r"\\section\{"
+        for match in re.finditer(pattern, text):
+            start = match.start()
+            brace_start = match.end()
+
+            # Count braces to find matching closing brace
+            depth = 1
+            pos = brace_start
+            while pos < len(text) and depth > 0:
+                if text[pos] == "{" and (pos == 0 or text[pos - 1] != "\\"):
+                    depth += 1
+                elif text[pos] == "}" and (pos == 0 or text[pos - 1] != "\\"):
+                    depth -= 1
+                pos += 1
+
+            if depth == 0:
+                title = text[brace_start : pos - 1]
+                logger.debug(f"Extracted section title with nested braces: {title[:80]}...")
+                yield SectionMatch(start, pos, title, text[start:pos])
+
+    @staticmethod
+    def _fix_texsoup_incompatibilities(content: str) -> str:
+        """
+        Fix LaTeX patterns that TexSoup can't parse.
+
+        Args:
+            content: Raw LaTeX content
+
+        Returns:
+            Fixed LaTeX content that TexSoup can parse
+        """
+        # Fix possessive apostrophes after LaTeX commands (}'s pattern)
+        # TexSoup can't parse \command{text}'s, so rewrite to \command{text's}
+        # This handles patterns like \textsc{LLM-Guard}'s -> \textsc{LLM-Guard's}
+        # Fix possessive apostrophes after LaTeX commands
+        content = re.sub(r"\}('s)\b", r"\1}", content)
+        return content
+
     def process(self) -> LaTeXDocument:
         """
         Process LaTeX document and extract all content.
@@ -149,6 +247,27 @@ class LaTeXProcessor:
 
         return doc
 
+    def _parse_string(self, latex_str: str) -> TexNode:
+        """
+        Parse a LaTeX string using TexSoup with compatibility fixes.
+
+        Args:
+            latex_str: LaTeX string to parse
+
+        Returns:
+            TexSoup parsed tree
+        """
+        # Apply TexSoup compatibility fixes
+        fixed_content = self._fix_texsoup_incompatibilities(latex_str)
+        try:
+            return TexSoup(fixed_content)
+        except Exception:
+            # Log context for debugging
+            logger.error(f"TexSoup parsing failed. String preview: {repr(latex_str[:200])}")
+            logger.error(f"After fix: {repr(fixed_content[:200])}")
+            logger.error(f"Strings equal: {latex_str == fixed_content}")
+            raise
+
     def _parse_file(self, tex_file: Path) -> TexNode:
         """
         Parse a .tex file using TexSoup.
@@ -163,7 +282,7 @@ class LaTeXProcessor:
             content = tex_file.read_text(encoding="utf-8", errors="ignore")
             # Remove comments
             content = re.sub(r"(?<!\\)%.*$", "", content, flags=re.MULTILINE)
-            soup = TexSoup(content)
+            soup = self._parse_string(content)
             logger.debug(f"Parsed {tex_file}")
             return soup
         except Exception as e:
@@ -225,9 +344,8 @@ class LaTeXProcessor:
         # Expand \input{} commands inline to get full content
         raw_text = self._expand_inputs(raw_text, current_file)
 
-        # Find all section positions
-        section_pattern = r"\\section\{([^}]+)\}"
-        section_matches = list(re.finditer(section_pattern, raw_text))
+        # Find all section positions (handle nested braces)
+        section_matches = list(self._find_sections(raw_text))
 
         logger.debug(f"Found {len(section_matches)} sections in {current_file.name}")
 
@@ -235,7 +353,7 @@ class LaTeXProcessor:
         for i, match in enumerate(section_matches):
             title = match.group(1)
             # Clean title
-            title = self._node_to_text(TexSoup(title))
+            title = self._node_to_text(self._parse_string(title))
 
             # Find content start (after section header)
             content_start = match.end()
@@ -483,10 +601,14 @@ class LaTeXProcessor:
                 source_file=current_file,
             )
 
-            # Extract caption
-            caption_match = re.search(r"\\caption\{([^}]+)\}", table_content)
+            # Extract caption (handle nested braces)
+            caption_match = re.search(r"\\caption\{", table_content)
             if caption_match:
-                table.caption = self._node_to_text(TexSoup(caption_match.group(1)))
+                caption_content, _ = self._extract_braced_content(
+                    table_content, caption_match.end() - 1
+                )
+                if caption_content:
+                    table.caption = self._node_to_text(self._parse_string(caption_content))
 
             # Extract label
             label_match = re.search(r"\\label\{([^}]+)\}", table_content)
@@ -557,7 +679,7 @@ class LaTeXProcessor:
         # Extract content between sections from raw text
         for i, match in enumerate(matches):
             level = 2 if match.group(1) == "subsection" else 3
-            title = self._node_to_text(TexSoup(match.group(2)))
+            title = self._node_to_text(self._parse_string(match.group(2)))
 
             # Find content start (after this section header)
             content_start = match.end()
@@ -575,7 +697,7 @@ class LaTeXProcessor:
             self._extract_math_from_text(raw_content, doc)
 
             # Clean the content
-            clean_content = self._node_to_text(TexSoup(raw_content))
+            clean_content = self._node_to_text(self._parse_string(raw_content))
 
             # Extract figure/table references from content
             figure_refs, table_refs = self._extract_references_from_content(clean_content)
@@ -631,7 +753,7 @@ class LaTeXProcessor:
 
                 if section_title:
                     # Clean up section title and store by input filename
-                    section_title = self._node_to_text(TexSoup(section_title))
+                    section_title = self._node_to_text(self._parse_string(section_title))
                     input_map[input_name] = section_title
                     logger.debug(f"Mapped \\input{{{input_name}}} -> section '{section_title}'")
 
@@ -684,7 +806,7 @@ class LaTeXProcessor:
 
                     if section_title:
                         # Clean up section title
-                        section_title = self._node_to_text(TexSoup(section_title))
+                        section_title = self._node_to_text(self._parse_string(section_title))
                         figure_map[id(figure_nodes[fig_idx])] = section_title
                         logger.debug(
                             f"Mapped figure {fig_idx+1} to section/subsection '{section_title}'"
@@ -831,7 +953,9 @@ class LaTeXProcessor:
                 current_section = None
                 for section_match in reversed(section_matches):
                     if section_match.start() < table_pos:
-                        section_title = self._node_to_text(TexSoup(section_match.group(2)))
+                        section_title = self._node_to_text(
+                            self._parse_string(section_match.group(2))
+                        )
                         current_section = section_title
                         break
 
@@ -961,7 +1085,7 @@ class LaTeXProcessor:
             section_str = re.sub(r"^\\[a-z]+\{[^}]+\}", "", section_str, count=1)
 
             # Clean up the content
-            content = self._node_to_text(TexSoup(section_str))
+            content = self._node_to_text(self._parse_string(section_str))
 
             return content
         except Exception as e:
@@ -1088,6 +1212,8 @@ class LaTeXProcessor:
                     content = input_path.read_text(encoding="utf-8", errors="ignore")
                     # Remove comments
                     content = re.sub(r"(?<!\\)%.*$", "", content, flags=re.MULTILINE)
+                    # Apply TexSoup compatibility fixes
+                    content = self._fix_texsoup_incompatibilities(content)
                     # Recursively expand nested inputs
                     content = self._expand_inputs(content, input_path, depth + 1)
                     logger.debug(f"Expanded \\input{{{input_name}}} ({len(content)} chars)")
