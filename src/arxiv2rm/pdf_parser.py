@@ -1068,6 +1068,10 @@ class PDFParser:
         - Drawing clusters that form charts/plots
         - Areas with figure captions nearby
 
+        IMPORTANT: Filters out styled text boxes (code blocks with background colors)
+        by checking text density in the region. Real figures have graphical content,
+        not just text on a colored background.
+
         Args:
             page: PyMuPDF page object
             page_num: Page number (0-indexed)
@@ -1085,6 +1089,23 @@ class PDFParser:
         # Get all drawings (vector graphics) on the page
         drawings = page.get_drawings()
         if not drawings:
+            return []
+
+        # Analyze drawing types - real figures have strokes (lines/curves),
+        # styled text boxes typically only have fills (background rectangles)
+        has_strokes = False
+        stroke_drawings = []
+        for d in drawings:
+            dtype = d.get("type", "")
+            if "s" in dtype:  # Stroke (line/curve)
+                has_strokes = True
+                stroke_drawings.append(d)
+
+        # If no strokes at all, likely just styled text boxes - skip
+        if not has_strokes:
+            logger.debug(
+                f"Page {page_num + 1}: No stroke drawings found, skipping figure detection"
+            )
             return []
 
         # Get text blocks to find figure captions
@@ -1114,65 +1135,84 @@ class PDFParser:
                                 }
                             )
 
-        # Cluster drawings into figure regions
-        if drawings:
-            drawing_rects = []
-            for d in drawings:
-                rect = d.get("rect")
-                if rect:
-                    drawing_rects.append(fitz.Rect(rect))
-
-            # Merge overlapping/nearby drawing rectangles into figure regions
-            merged_regions = self._merge_nearby_rects(drawing_rects, margin=10)
-
-            # Filter regions - keep only significant ones
-            for region in merged_regions:
-                # Skip very small regions (likely just lines or decorations)
-                if region.width < 50 or region.height < 50:
+        # Cluster stroke drawings into figure regions (ignore fill-only drawings)
+        drawing_rects = []
+        for d in stroke_drawings:
+            rect = d.get("rect")
+            if rect:
+                r = fitz.Rect(rect)
+                # Skip full-page rectangles (likely page borders)
+                if r.width > page_width * 0.95 and r.height > page_height * 0.95:
                     continue
+                drawing_rects.append(r)
 
-                # Skip regions that span the full page width (likely borders)
-                if region.width > page_width * 0.95:
-                    continue
+        if not drawing_rects:
+            return []
 
-                # Skip tiny regions relative to page
-                area_ratio = (region.width * region.height) / (page_width * page_height)
-                if area_ratio < 0.02:  # Less than 2% of page
-                    continue
+        # Merge overlapping/nearby drawing rectangles into figure regions
+        merged_regions = self._merge_nearby_rects(drawing_rects, margin=10)
 
-                # Find the closest caption to this region
-                closest_caption = None
-                min_distance = float("inf")
-                for cap in caption_info:
-                    if self._rects_are_close(region, cap["rect"], margin=100):
-                        # Calculate vertical distance (caption usually below figure)
-                        dist = abs(cap["rect"].y0 - region.y1)  # Caption below
-                        if dist < min_distance:
-                            min_distance = dist
-                            closest_caption = cap
+        # Filter regions - keep only significant ones that are actual figures
+        for region in merged_regions:
+            # Skip very small regions (likely just lines or decorations)
+            if region.width < 50 or region.height < 50:
+                continue
 
-                # Keep if it's a significant region or near a caption
-                is_near_caption = closest_caption is not None and min_distance < 100
-                if area_ratio > 0.05 or is_near_caption:
-                    # Expand region slightly to include margins
-                    expanded = fitz.Rect(
-                        max(0, region.x0 - 5),
-                        max(0, region.y0 - 5),
-                        min(page_width, region.x1 + 5),
-                        min(page_height, region.y1 + 5),
-                    )
-                    figure_regions.append(
-                        {
-                            "rect": expanded,
-                            "figure_num": closest_caption["figure_num"]
-                            if closest_caption
-                            else None,
-                        }
-                    )
+            # Skip regions that span the full page width (likely borders)
+            if region.width > page_width * 0.95:
+                continue
+
+            # Skip tiny regions relative to page
+            area_ratio = (region.width * region.height) / (page_width * page_height)
+            if area_ratio < 0.02:  # Less than 2% of page
+                continue
+
+            # CRITICAL: Check text density in the region
+            # Styled text boxes (code blocks) have high text density
+            # Real figures (charts, diagrams) have low text density
+            text_in_region = page.get_text("text", clip=region)
+            text_density = len(text_in_region.strip()) / (region.width * region.height) * 1000
+
+            # If text density is high, this is likely a styled text box, not a figure
+            # Threshold: ~0.5 chars per pixel² (scaled by 1000 for readability)
+            if text_density > 0.3:
+                logger.debug(
+                    f"Page {page_num + 1}: Skipping region with high text density "
+                    f"({text_density:.2f}): {text_in_region[:50]}..."
+                )
+                continue
+
+            # Find the closest caption to this region
+            closest_caption = None
+            min_distance = float("inf")
+            for cap in caption_info:
+                if self._rects_are_close(region, cap["rect"], margin=100):
+                    # Calculate vertical distance (caption usually below figure)
+                    dist = abs(cap["rect"].y0 - region.y1)  # Caption below
+                    if dist < min_distance:
+                        min_distance = dist
+                        closest_caption = cap
+
+            # Keep if it's a significant region or near a caption
+            is_near_caption = closest_caption is not None and min_distance < 100
+            if area_ratio > 0.05 or is_near_caption:
+                # Expand region slightly to include margins
+                expanded = fitz.Rect(
+                    max(0, region.x0 - 5),
+                    max(0, region.y0 - 5),
+                    min(page_width, region.x1 + 5),
+                    min(page_height, region.y1 + 5),
+                )
+                figure_regions.append(
+                    {
+                        "rect": expanded,
+                        "figure_num": closest_caption["figure_num"] if closest_caption else None,
+                    }
+                )
 
         logger.debug(
             f"Page {page_num + 1}: Found {len(figure_regions)} figure regions "
-            f"from {len(drawings)} drawings"
+            f"from {len(drawings)} drawings ({len(stroke_drawings)} with strokes)"
         )
         return figure_regions
 
