@@ -198,6 +198,26 @@ class LaTeXProcessor:
         # This handles patterns like \textsc{LLM-Guard}'s -> \textsc{LLM-Guard's}
         # Fix possessive apostrophes after LaTeX commands
         content = re.sub(r"\}('s)\b", r"\1}", content)
+
+        # Fix \\[Npt] line breaks with optional spacing argument
+        # TexSoup misinterprets the [ after \\ as an unmatched bracket
+        # Replace \\[5pt] with just \\ (spacing is irrelevant for text extraction)
+        content = re.sub(r"\\\\(?:\[[\d.]+(?:pt|em|ex|mm|cm|in)\])", r"\\\\", content)
+
+        # Strip \ifx conditional blocks that TexSoup cannot parse
+        # These are TeX primitives for conditional compilation (e.g., multi-venue papers)
+        # We keep the content but remove the \ifx/\else/\fi control flow
+        # Handle nested \ifx...\else...\fi patterns by removing the directives
+        content = re.sub(r"\\ifx\s*\\[a-zA-Z]+\s*\\[a-zA-Z]+\s*\n?", "", content)
+        content = re.sub(r"\\else\\ifx\s*\\[a-zA-Z]+\s*\\[a-zA-Z]+\s*\n?", "", content)
+        # Remove standalone \else (not followed by \ifx)
+        content = re.sub(r"\\else\s*\n(?!\\ifx)", "", content)
+        # Remove \fi that's not part of a word (keep \fill, \figure, etc.)
+        content = re.sub(r"\\fi(?![a-zA-Z])", "", content)
+
+        # Remove \twocolumn[ with unmatched bracket (common in ICML templates)
+        content = re.sub(r"\\twocolumn\s*\[", "", content)
+
         return content
 
     def process(self) -> LaTeXDocument:
