@@ -850,7 +850,7 @@ Write the 3 paragraphs now. Plain text only, no markdown."""
         return text
 
     def _generate_fallback_summary(self, content: str, title: str = "") -> str:
-        """Generate a basic fallback summary when Claude CLI is unavailable."""
+        """Generate a basic fallback summary from extracted content."""
         # Extract abstract if present
         abstract_pattern = (
             r"(?:Abstract|ABSTRACT)[:\s]*\n?(.*?)"
@@ -859,20 +859,17 @@ Write the 3 paragraphs now. Plain text only, no markdown."""
         abstract_match = re.search(abstract_pattern, content, re.DOTALL | re.IGNORECASE)
 
         title_prefix = f"Paper: {title}\n\n" if title else ""
-        unavailable_msg = "[Claude CLI not accessible]"
 
         if abstract_match:
             abstract = abstract_match.group(1).strip()[:1500]
-            return (
-                f"{title_prefix}MAIN FINDINGS:\n{abstract}\n\n"
-                f"LIMITATIONS:\n{unavailable_msg}\n\n"
-                f"KEY INSIGHTS:\nPlease read the full paper for detailed insights."
-            )
+            return f"{title_prefix}{abstract}"
         else:
-            return (
-                f"{title_prefix}[Executive summary unavailable - {unavailable_msg}]\n\n"
-                f"Please read the paper for full content."
-            )
+            # Extract first meaningful paragraph as summary
+            paragraphs = [p.strip() for p in content.split("\n\n") if len(p.strip()) > 100]
+            if paragraphs:
+                summary = paragraphs[0][:1500]
+                return f"{title_prefix}{summary}"
+            return f"{title_prefix}See the full paper for details."
 
     def _format_table_text(self, content: str) -> str:
         """
