@@ -218,6 +218,30 @@ class LaTeXProcessor:
         # Remove \twocolumn[ with unmatched bracket (common in ICML templates)
         content = re.sub(r"\\twocolumn\s*\[", "", content)
 
+        # Remove \makeatletter...\makeatother blocks (internal LaTeX macro definitions)
+        # These often contain \newenvironment with \begin/\end pairs that TexSoup
+        # misinterprets as real environments (e.g., \begin{algorithm} inside a definition)
+        content = re.sub(r"\\makeatletter.*?\\makeatother", "", content, flags=re.DOTALL)
+
+        # Replace LaTeX backtick quotes (`word' and ``word'') with straight quotes
+        # TexSoup misparses backticks inside braced arguments as malformed tokens
+        content = re.sub(r"``(.*?)''", r'"\1"', content)
+        content = re.sub(r"`(.*?)'", r"'\1'", content)
+
+        # Remove \titleformat and \titlespacing commands (from titlesec package)
+        # These contain \section/\subsection as arguments, which TexSoup tries to
+        # parse as actual sectioning commands, causing malformed argument errors
+        content = re.sub(
+            r"\\titleformat\{[^}]*\}" r"(?:\s*(?:\[[^\]]*\])?\s*\{[^}]*\})*",
+            "",
+            content,
+        )
+        content = re.sub(
+            r"\\titlespacing\*?\{[^}]*\}" r"(?:\s*\{[^}]*\})*",
+            "",
+            content,
+        )
+
         return content
 
     def process(self) -> LaTeXDocument:
