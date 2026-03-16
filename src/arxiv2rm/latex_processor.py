@@ -1347,6 +1347,25 @@ class LaTeXProcessor:
 
         return image_files
 
+    def _pdf_to_png(self, pdf_path: Path) -> Optional[Path]:
+        """Convert first page of a PDF figure to PNG using PyMuPDF."""
+        try:
+            import fitz
+
+            png_path = pdf_path.with_suffix(".png")
+            if png_path.exists():
+                return png_path
+            doc = fitz.open(str(pdf_path))
+            page = doc[0]
+            mat = fitz.Matrix(2.5, 2.5)
+            pix = page.get_pixmap(matrix=mat)
+            pix.save(str(png_path))
+            doc.close()
+            return png_path
+        except Exception as e:
+            logger.warning(f"Failed to convert PDF figure to PNG: {pdf_path}: {e}")
+            return None
+
     def _resolve_image_path(self, image_path: str) -> Optional[Path]:
         r"""
         Resolve image path to actual file.
@@ -1372,10 +1391,11 @@ class LaTeXProcessor:
                     alt_candidate = self.latex_dir / (base_without_ext + alt_ext)
                     if alt_candidate.exists():
                         return alt_candidate
-            # Fall back to original path if no alternative exists
+            # Fall back to converting PDF to PNG
             candidate = self.latex_dir / image_path
             if candidate.exists():
-                return candidate
+                png = self._pdf_to_png(candidate)
+                return png
 
         # Try adding extensions
         base_path = image_path
