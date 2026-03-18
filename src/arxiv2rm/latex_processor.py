@@ -228,6 +228,16 @@ class LaTeXProcessor:
         content = re.sub(r"``(.*?)''", r'"\1"', content)
         content = re.sub(r"`(.*?)'", r"'\1'", content)
 
+        # Escape dollar signs inside verbatim environments
+        # TexSoup treats $ as math mode delimiters even inside verbatim blocks,
+        # where they may represent currency (e.g., "$2.2 billion") and are unmatched
+        content = re.sub(
+            r"\\begin\{verbatim\}(.*?)\\end\{verbatim\}",
+            lambda m: m.group(0).replace("$", r"\$"),
+            content,
+            flags=re.DOTALL,
+        )
+
         # Remove \titleformat and \titlespacing commands (from titlesec package)
         # These contain \section/\subsection as arguments, which TexSoup tries to
         # parse as actual sectioning commands, causing malformed argument errors
