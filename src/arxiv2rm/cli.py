@@ -149,6 +149,13 @@ def main(ctx, config_file, log_level):
 @click.option("--ocr-engine", default="local", help="OCR engine (local, groq, tesseract)")
 @click.option("--image-quality", type=int, default=85, help="JPEG quality (1-100)")
 @click.option("--font-size", type=int, default=10, help="Font size (10, 12, 14, 16, 18)")
+@click.option(
+    "--device",
+    "device_model",
+    default="rmpro",
+    type=click.Choice(["rm1", "rm2", "rmpro"]),
+    help="Target device (rm1, rm2, rmpro for reMarkable Paper Pro with color)",
+)
 @click.option("--title", help="Override document title")
 @click.option("--author", multiple=True, help="Author name (can be repeated)")
 @click.option("--columns/--no-columns", default=True, help="Enable column detection")
@@ -163,6 +170,7 @@ def convert(
     ocr_engine,
     image_quality,
     font_size,
+    device_model,
     title,
     author,
     columns,
@@ -204,6 +212,7 @@ def convert(
             title=title,
             authors=list(author) if author else None,
             prefer_latex=True,
+            device_model=device_model,
         )
 
         if success:
@@ -266,10 +275,11 @@ def convert(
                     latex_dir=latex_dir,
                     main_tex_file=main_tex_file,
                     output_path=output_path,
-                    font_size=10,
+                    font_size=font_size,
                     title=title,
                     authors=list(author) if author else None,
                     render_tables_as_images=True,
+                    device_model=device_model,
                 )
                 progress.update(task, advance=90)
 

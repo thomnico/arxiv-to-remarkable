@@ -132,12 +132,37 @@ REMARKABLE_HEIGHT_PT = REMARKABLE_HEIGHT_PX * 72 / REMARKABLE_DPI  # ~596 points
 # Page size tuple for reportlab
 REMARKABLE_PAGE_SIZE = (REMARKABLE_WIDTH_PT, REMARKABLE_HEIGHT_PT)
 
+# reMarkable Paper Pro display specifications
+# 11.8" color E Ink (Kaleido 3), 1620×2160 pixels (portrait), 229 DPI
+REMARKABLE_PRO_WIDTH_PX = 1620
+REMARKABLE_PRO_HEIGHT_PX = 2160
+REMARKABLE_PRO_DPI = 229
+
+REMARKABLE_PRO_WIDTH_PT = REMARKABLE_PRO_WIDTH_PX * 72 / REMARKABLE_PRO_DPI  # ~509 points
+REMARKABLE_PRO_HEIGHT_PT = REMARKABLE_PRO_HEIGHT_PX * 72 / REMARKABLE_PRO_DPI  # ~679 points
+
+REMARKABLE_PRO_PAGE_SIZE = (REMARKABLE_PRO_WIDTH_PT, REMARKABLE_PRO_HEIGHT_PT)
+
+# Muted colors for reMarkable Pro color E Ink (Kaleido has limited gamut)
+# Saturated colors render poorly; muted/desaturated tones work best
+COLOR_HEADING1 = colors.Color(0.10, 0.25, 0.55)   # deep navy blue
+COLOR_HEADING2 = colors.Color(0.15, 0.35, 0.60)   # medium navy
+COLOR_HEADING3 = colors.Color(0.20, 0.40, 0.55)   # steel blue
+COLOR_LINK = colors.Color(0.05, 0.35, 0.65)        # muted blue
+COLOR_TABLE_HEADER_BG = colors.Color(0.75, 0.83, 0.92)  # pale blue
+COLOR_TABLE_HEADER_BORDER = colors.Color(0.35, 0.50, 0.70)
+COLOR_TABLE_ALT_ROW = colors.Color(0.94, 0.96, 0.99)    # very pale blue
+COLOR_NOTES_LINE = colors.Color(0.55, 0.65, 0.80)       # soft blue-grey
+
 
 @dataclass
 class PDFBuilderConfig:
     """Configuration for PDF generation."""
 
-    # Page dimensions (reMarkable 1 optimized)
+    # Target device: "rm1", "rm2", or "rmpro" (reMarkable Paper Pro with color)
+    device_model: str = "rmpro"
+
+    # Page dimensions — set automatically from device_model in __post_init__
     page_width: float = REMARKABLE_WIDTH_PT
     page_height: float = REMARKABLE_HEIGHT_PT
 
@@ -163,6 +188,11 @@ class PDFBuilderConfig:
     # Notes zone at bottom of each page
     notes_zone_enabled: bool = True
     notes_zone_height: float = 80  # Height in points (~1.1 inch)
+
+    def __post_init__(self):
+        if self.device_model == "rmpro":
+            self.page_width = REMARKABLE_PRO_WIDTH_PT
+            self.page_height = REMARKABLE_PRO_HEIGHT_PT
 
 
 @dataclass
@@ -315,46 +345,53 @@ class PDFBuilder:
             firstLineIndent=0,  # No indent for cleaner look
         )
 
+        is_color = self.config.device_model == "rmpro"
+        bold_font = f"{base_font}-Bold" if self.config.use_opendyslexic else "Helvetica-Bold"
+
         # Title
         styles["Title"] = ParagraphStyle(
             name="Title",
-            fontName=f"{base_font}-Bold" if self.config.use_opendyslexic else "Helvetica-Bold",
+            fontName=bold_font,
             fontSize=font_size + 8,
             leading=(font_size + 8) * 1.3,
             spaceBefore=0,
             spaceAfter=12,
             alignment=1,  # Center
+            textColor=COLOR_HEADING1 if is_color else colors.black,
         )
 
         # Headings - improved spacing for visual hierarchy
         styles["Heading1"] = ParagraphStyle(
             name="Heading1",
-            fontName=f"{base_font}-Bold" if self.config.use_opendyslexic else "Helvetica-Bold",
+            fontName=bold_font,
             fontSize=font_size + 4,
             leading=(font_size + 4) * 1.4,
             spaceBefore=24,  # More space before major headings
             spaceAfter=12,
             keepWithNext=True,
+            textColor=COLOR_HEADING1 if is_color else colors.black,
         )
 
         styles["Heading2"] = ParagraphStyle(
             name="Heading2",
-            fontName=f"{base_font}-Bold" if self.config.use_opendyslexic else "Helvetica-Bold",
+            fontName=bold_font,
             fontSize=font_size + 2,
             leading=(font_size + 2) * 1.4,
             spaceBefore=20,
             spaceAfter=10,
             keepWithNext=True,
+            textColor=COLOR_HEADING2 if is_color else colors.black,
         )
 
         styles["Heading3"] = ParagraphStyle(
             name="Heading3",
-            fontName=f"{base_font}-Bold" if self.config.use_opendyslexic else "Helvetica-Bold",
+            fontName=bold_font,
             fontSize=font_size,
             leading=font_size * 1.4,
             spaceBefore=16,
             spaceAfter=8,
             keepWithNext=True,
+            textColor=COLOR_HEADING3 if is_color else colors.black,
         )
 
         # Abstract
@@ -932,35 +969,40 @@ class PDFBuilder:
             # Create table
             table = Table(cleaned_data, colWidths=col_widths)
 
+            is_color = self.config.device_model == "rmpro"
+            grid_color = colors.Color(0.7, 0.7, 0.7)
+
             # Define table style with improved padding and borders
             style_commands = [
-                # Grid - lighter for readability
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.Color(0.7, 0.7, 0.7)),
-                # Increased padding for readability
+                ("GRID", (0, 0), (-1, -1), 0.5, grid_color),
                 ("TOPPADDING", (0, 0), (-1, -1), 6),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
                 ("LEFTPADDING", (0, 0), (-1, -1), 6),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                # Alignment
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("ALIGN", (0, 0), (-1, -1), "LEFT"),
             ]
 
             # Header row styling
             if header_row and len(cleaned_data) > 1:
+                header_bg = COLOR_TABLE_HEADER_BG if is_color else colors.Color(0.9, 0.9, 0.9)
+                header_border = (
+                    COLOR_TABLE_HEADER_BORDER if is_color else colors.Color(0.5, 0.5, 0.5)
+                )
                 style_commands.extend(
                     [
-                        ("BACKGROUND", (0, 0), (-1, 0), colors.Color(0.9, 0.9, 0.9)),
-                        ("LINEBELOW", (0, 0), (-1, 0), 1, colors.Color(0.5, 0.5, 0.5)),
+                        ("BACKGROUND", (0, 0), (-1, 0), header_bg),
+                        ("LINEBELOW", (0, 0), (-1, 0), 1, header_border),
                         ("ALIGN", (0, 0), (-1, 0), "CENTER"),
                     ]
                 )
 
             # Alternating row colors for better readability
+            alt_row_color = COLOR_TABLE_ALT_ROW if is_color else colors.Color(0.97, 0.97, 0.97)
             for row_idx in range(1, len(cleaned_data)):
                 if row_idx % 2 == 0:
                     style_commands.append(
-                        ("BACKGROUND", (0, row_idx), (-1, row_idx), colors.Color(0.97, 0.97, 0.97))
+                        ("BACKGROUND", (0, row_idx), (-1, row_idx), alt_row_color)
                     )
 
             table.setStyle(TableStyle(style_commands))
@@ -1094,8 +1136,12 @@ class PDFBuilder:
         zone_width = self.config.page_width - self.config.margin_left - self.config.margin_right
         zone_x = self.config.margin_left
 
+        is_color = self.config.device_model == "rmpro"
+        notes_line_color = COLOR_NOTES_LINE if is_color else lightgrey
+        notes_label_color = COLOR_NOTES_LINE if is_color else lightgrey
+
         # Draw separator line
-        canvas.setStrokeColor(lightgrey)
+        canvas.setStrokeColor(notes_line_color)
         canvas.setLineWidth(0.5)
         line_y = zone_y + zone_height + 5
         canvas.line(zone_x, line_y, zone_x + zone_width, line_y)
@@ -1106,11 +1152,11 @@ class PDFBuilder:
             canvas.setFont(f"{base_font}-Italic", 9)
         except Exception:
             canvas.setFont("Helvetica-Oblique", 9)
-        canvas.setFillColor(lightgrey)
+        canvas.setFillColor(notes_label_color)
         canvas.drawString(zone_x, zone_y + zone_height - 2, "My Notes:")
 
         # Draw light ruled lines for notes
-        canvas.setStrokeColor(lightgrey)
+        canvas.setStrokeColor(notes_line_color)
         canvas.setLineWidth(0.25)
         line_spacing = 18  # Points between ruled lines
         num_lines = int((zone_height - 15) / line_spacing)
@@ -1127,6 +1173,7 @@ def convert_pdf_to_remarkable(
     output_path: Optional[Path] = None,
     font_size: int = 10,
     extract_formulas: bool = True,
+    device_model: str = "rmpro",
 ) -> Path:
     """
     Convert a PDF to reMarkable-optimized format.
@@ -1159,7 +1206,7 @@ def convert_pdf_to_remarkable(
 
     # Initialize parser and builder
     parser = PDFParser()
-    config = PDFBuilderConfig(font_size=font_size)
+    config = PDFBuilderConfig(font_size=font_size, device_model=device_model)
     builder = PDFBuilder(config=config)
 
     # Create temp directory for images
@@ -1592,6 +1639,7 @@ def convert_latex_to_remarkable(
     authors: Optional[List[str]] = None,
     render_tables_as_images: bool = True,
     render_math_as_images: bool = True,
+    device_model: str = "rmpro",
 ) -> Path:
     """
     Convert LaTeX source to reMarkable-optimized PDF.
@@ -1675,7 +1723,7 @@ def convert_latex_to_remarkable(
                 logger.debug(f"Rendered math {content_hash}: {formula.latex_code[:30]}...")
 
     # Initialize builder
-    config = PDFBuilderConfig(font_size=font_size)
+    config = PDFBuilderConfig(font_size=font_size, device_model=device_model)
     builder = PDFBuilder(config=config)
 
     # Set metadata

@@ -62,6 +62,7 @@ class RemarkableConfig(BaseModel):
     default_folder: str = "Research"
     cloud_token: Optional[str] = None
     auto_upload: bool = False
+    device_model: str = Field(default="rmpro", pattern="^(rm1|rm2|rmpro)$")
 
 
 class ArxivConfig(BaseModel):

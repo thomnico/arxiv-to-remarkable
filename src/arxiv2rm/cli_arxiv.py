@@ -17,6 +17,7 @@ def download_and_convert_arxiv(
     title: str | None = None,
     authors: list[str] | None = None,
     prefer_latex: bool = True,
+    device_model: str = "rmpro",
 ) -> tuple[bool, Path | None, str | None]:
     """
     Download and convert an ArXiv paper.
@@ -101,6 +102,7 @@ def download_and_convert_arxiv(
                     title=paper_title,
                     authors=paper_authors,
                     render_tables_as_images=True,
+                    device_model=device_model,
                 )
 
                 progress.update(task, advance=30)

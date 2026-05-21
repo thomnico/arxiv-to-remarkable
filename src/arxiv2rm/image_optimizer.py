@@ -27,6 +27,7 @@ class RemarkableDevice(Enum):
 
     REMARKABLE_1 = (1404, 1872)
     REMARKABLE_2 = (1872, 2480)
+    REMARKABLE_PRO = (1620, 2160)  # reMarkable Paper Pro, 11.8" color E Ink, 229 DPI
 
 
 @dataclass
@@ -39,7 +40,7 @@ class OptimizationSettings:
     contrast_factor: float = 1.2  # Contrast enhancement (1.0 = no change)
     sharpness_factor: float = 1.1  # Sharpness enhancement
     dither: bool = False  # Apply Floyd-Steinberg dithering
-    grayscale: bool = True  # Convert to grayscale
+    grayscale: bool = True  # Convert to grayscale (set False for reMarkable Pro color)
     maintain_aspect: bool = True  # Maintain aspect ratio
 
 
