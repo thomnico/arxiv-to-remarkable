@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "ArXiv → reMarkable",
+  "version": "0.1.0",
+  "description": "Send the current ArXiv (or PDF) page to your reMarkable via the local arxiv2rm daemon.",
+  "permissions": ["activeTab", "storage", "contextMenus", "notifications"],
+  "host_permissions": [
+    "http://127.0.0.1:7842/*",
+    "https://arxiv.org/*",
+    "https://*.arxiv.org/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Send to reMarkable",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/16.png",
+      "48": "icons/48.png",
+      "128": "icons/128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://arxiv.org/*", "https://*.arxiv.org/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html"
+}

@@ -1,0 +1,51 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>ArXiv → reMarkable — Options</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body style="width: 360px">
+    <h1 style="font-size: 16px">Options</h1>
+
+    <label>
+      Daemon URL
+      <input id="daemonUrl" type="url" />
+    </label>
+
+    <label>
+      Bearer token (from ~/.arxiv2rm/daemon.token)
+      <input id="token" type="password" />
+    </label>
+
+    <label>
+      Font size
+      <select id="fontSize">
+        <option>12</option>
+        <option>14</option>
+        <option>16</option>
+        <option>18</option>
+      </select>
+    </label>
+
+    <label>
+      Device
+      <select id="deviceModel">
+        <option value="rm1">reMarkable 1</option>
+        <option value="rm2">reMarkable 2</option>
+        <option value="rmpro">reMarkable Paper Pro (color)</option>
+      </select>
+    </label>
+
+    <label>
+      reMarkable folder
+      <input id="folder" type="text" placeholder="/ArXiv/" list="folders" />
+      <datalist id="folders"></datalist>
+    </label>
+
+    <button id="save">Save</button>
+    <div id="msg" style="font-size: 11px; margin-top: 6px"></div>
+
+    <script src="options.js"></script>
+  </body>
+</html>

@@ -1,0 +1,71 @@
+body {
+  font-family: -apple-system, system-ui, sans-serif;
+  width: 320px;
+  padding: 12px;
+  margin: 0;
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+h1 {
+  font-size: 14px;
+  margin: 0;
+  flex: 1;
+}
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #999;
+}
+.dot.ok {
+  background: #2ea043;
+}
+.dot.err {
+  background: #d73a49;
+}
+.label {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: #666;
+  margin-top: 8px;
+}
+.url {
+  font-size: 12px;
+  word-break: break-all;
+  margin-bottom: 8px;
+}
+button {
+  width: 100%;
+  padding: 8px;
+  border: 0;
+  background: #0969da;
+  color: #fff;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+button:disabled {
+  background: #999;
+  cursor: not-allowed;
+}
+progress {
+  width: 100%;
+  margin-top: 6px;
+}
+pre {
+  background: #fbe9e7;
+  padding: 6px;
+  font-size: 11px;
+  white-space: pre-wrap;
+  max-height: 120px;
+  overflow: auto;
+}
+footer {
+  margin-top: 10px;
+  text-align: right;
+  font-size: 11px;
+}
