@@ -377,7 +377,18 @@ def convert(
 
         # Upload to reMarkable if requested
         if upload:
-            console.print("\n[yellow]reMarkable upload not yet implemented.[/yellow]")
+            from arxiv2rm.rm_cloud import upload_document
+
+            console.print("\n[cyan]Uploading to reMarkable...[/cyan]")
+            try:
+                upload_result = upload_document(str(result.output_path))
+                console.print(
+                    f"[bold green]Upload successful![/bold green] "
+                    f"id={upload_result['id']}"
+                )
+            except Exception as e:
+                console.print(f"[red]Upload failed:[/red] {e}")
+                sys.exit(1)
     else:
         console.print("\n[bold red]Conversion failed![/bold red]")
         console.print(f"[red]Error:[/red] {result.error}")

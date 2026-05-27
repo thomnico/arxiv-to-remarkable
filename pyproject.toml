@@ -87,9 +87,19 @@ eval = [
     "anthropic>=0.39.0",  # Claude Vision API for quality evaluation
 ]
 
+daemon = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.27.0",
+]
+
+remarkable = [
+    "crcmod>=1.7",
+]
+
 [project.scripts]
 arxiv2rm = "arxiv2rm.cli:main"
 arxiv2rm-detect = "arxiv2rm.cli_detect:main"
+arxiv2rm-daemon = "arxiv2rm.daemon.cli_daemon:main"
 
 [project.urls]
 Homepage = "https://github.com/thomnico/arxiv-to-remarkable"
