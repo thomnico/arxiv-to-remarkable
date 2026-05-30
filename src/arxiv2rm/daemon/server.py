@@ -238,28 +238,28 @@ async def _run_push(store: JobStore, job: Job, folder: str) -> None:
         store.update(job.id, stage="error", error="output PDF missing on disk")
         return
     store.update(job.id, stage="pushing", progress=90)
-    # Do not force rmapi's cloud schema version. The reMarkable cloud has
-    # changed the expected version over time (a hardcoded "4" is now rejected
-    # with "wrong schema got 4, expected: 3"). rmapi auto-detects it; a user
-    # who must pin it can export RMAPI_FORCE_SCHEMA_VERSION before starting the
-    # daemon — it is inherited here via os.environ.copy().
-    env = os.environ.copy()
-    cmd = ["rmapi", "put", job.output_path, folder]
+    # Upload via rm_cloud (inkan_doc) directly against the reMarkable Cloud API,
+    # avoiding the rmapi CLI which broke on schema 4. Folder placement is not
+    # yet supported by rm_cloud.upload_document (destination is ignored); the
+    # document lands at root and `remote_path` records the resulting doc id.
+    from arxiv2rm import rm_cloud
+
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=env
+        result = await asyncio.to_thread(
+            rm_cloud.upload_document, job.output_path, folder if folder != "/" else None
         )
-        out, _ = await proc.communicate()
-        if proc.returncode != 0:
-            store.update(job.id, stage="error", error=out.decode("utf-8", errors="replace"))
-            return
-        remote = f"{folder.rstrip('/')}/{Path(job.output_path).name}"
-        store.update(job.id, stage="done", progress=100, remote_path=remote)
-    except FileNotFoundError:
-        store.update(job.id, stage="error", error="rmapi binary not found in PATH")
+    except FileNotFoundError as exc:
+        store.update(job.id, stage="error", error=str(exc))
+        return
     except Exception as exc:  # noqa: BLE001
         logger.exception("push failed")
         store.update(job.id, stage="error", error=str(exc))
+        return
+
+    doc_id = result.get("id", "")
+    name = Path(job.output_path).stem
+    remote = f"{folder.rstrip('/')}/{name} [{doc_id}]" if doc_id else folder
+    store.update(job.id, stage="done", progress=100, remote_path=remote)
 
 
 _folders_cache: tuple[float, list[str]] = (0.0, [])
@@ -267,7 +267,7 @@ _FOLDERS_TTL_S = 60.0
 
 
 async def _list_remote_folders() -> list[str]:
-    """Return the list of remote directories from ``rmapi ls -r /``.
+    """Return the list of remote directories built from rm_cloud's listing.
 
     Cached for 60 seconds. Empty list on any failure so the popup can fall back
     to a free-text input.
@@ -279,27 +279,32 @@ async def _list_remote_folders() -> list[str]:
     if now - _folders_cache[0] < _FOLDERS_TTL_S and _folders_cache[1]:
         return _folders_cache[1]
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "rmapi",
-            "ls",
-            "-r",
-            "/",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        out, _ = await proc.communicate()
-        if proc.returncode != 0:
-            return []
-        folders: list[str] = []
-        for raw in out.decode("utf-8", errors="replace").splitlines():
-            line = raw.strip()
-            if line.startswith("[d]"):
-                folders.append("/" + line.removeprefix("[d]").strip().lstrip("/"))
-        folders = sorted(set(folders)) or ["/"]
-        _folders_cache = (now, folders)
-        return folders
-    except FileNotFoundError:
+        from arxiv2rm import rm_cloud
+
+        docs = await asyncio.to_thread(rm_cloud.list_documents)
+    except Exception:  # noqa: BLE001
+        logger.exception("folder listing failed")
         return []
+
+    # Resolve full paths by walking parent ids. Folders are CollectionType.
+    by_id = {d.id: d for d in docs}
+    folders: list[str] = []
+    for d in docs:
+        if d.type != "CollectionType":
+            continue
+        parts: list[str] = [d.name]
+        cur = d.parent
+        seen: set[str] = {d.id}
+        while cur and cur in by_id and cur not in seen:
+            seen.add(cur)
+            parent = by_id[cur]
+            parts.append(parent.name)
+            cur = parent.parent
+        folders.append("/" + "/".join(reversed(parts)))
+
+    folders = sorted(set(folders)) or ["/"]
+    _folders_cache = (now, folders)
+    return folders
 
 
 def _parse_output_path(text: str) -> Optional[str]:

@@ -281,20 +281,96 @@ def test_folders_endpoint_returns_cached_list(client, monkeypatch):
     assert r.json() == {"folders": ["/", "/ArXiv"]}
 
 
-def test_list_remote_folders_handles_missing_rmapi(monkeypatch):
+def test_list_remote_folders_handles_rm_cloud_failure(monkeypatch):
     server_mod._folders_cache = (0.0, [])
 
-    async def boom(*args, **kwargs):  # noqa: ARG001
-        raise FileNotFoundError("rmapi")
+    from arxiv2rm import rm_cloud
 
-    spawn_attr = "create_subprocess_" + "exec"
-    monkeypatch.setattr(asyncio, spawn_attr, boom)
+    def boom(*args, **kwargs):  # noqa: ARG001
+        raise RuntimeError("no device token")
+
+    monkeypatch.setattr(rm_cloud, "list_documents", boom)
     assert asyncio.run(server_mod._list_remote_folders()) == []
+
+
+def test_list_remote_folders_builds_paths_from_collections(monkeypatch):
+    server_mod._folders_cache = (0.0, [])
+
+    from arxiv2rm import rm_cloud
+    from arxiv2rm.rm_cloud import DocumentInfo
+
+    docs = [
+        DocumentInfo(id="root1", name="ArXiv", type="CollectionType", parent=""),
+        DocumentInfo(id="sub1", name="2024", type="CollectionType", parent="root1"),
+        DocumentInfo(id="doc1", name="paper", type="DocumentType", parent="root1"),
+    ]
+    monkeypatch.setattr(rm_cloud, "list_documents", lambda *a, **k: docs)
+    folders = asyncio.run(server_mod._list_remote_folders())
+    assert "/ArXiv" in folders
+    assert "/ArXiv/2024" in folders
+    # DocumentType entries must not appear
+    assert "/ArXiv/paper" not in folders
 
 
 def test_parse_output_path_picks_first_line():
     text = "blah\nOutput:\n/Users/n/Downloads/foo.pdf\nmore\n"
     assert _parse_output_path(text) == "/Users/n/Downloads/foo.pdf"
+
+
+def test_run_push_uses_rm_cloud_upload(tmp_path, monkeypatch):
+    """_run_push must call rm_cloud.upload_document, not rmapi."""
+    from arxiv2rm import rm_cloud
+    from arxiv2rm.daemon.jobs import Job
+
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+
+    captured = {}
+
+    def fake_upload(file_path, destination=None, device_token=None):
+        captured["file_path"] = file_path
+        captured["destination"] = destination
+        return {"status": "ok", "id": "doc-xyz", "name": "paper"}
+
+    monkeypatch.setattr(rm_cloud, "upload_document", fake_upload)
+
+    monkeypatch.setattr(jobs_mod, "JOBS_DIR", tmp_path / "jobs")
+    store = JobStore(directory=tmp_path / "jobs")
+    job = Job(id="j1", url="u", options={}, stage="converted", output_path=str(pdf))
+    store._jobs[job.id] = job
+    store._persist(job)
+
+    asyncio.run(server_mod._run_push(store, job, "/ArXiv"))
+
+    assert captured["file_path"] == str(pdf)
+    assert captured["destination"] == "/ArXiv"
+    final = store.get("j1")
+    assert final.stage == "done"
+    assert final.progress == 100
+    assert "doc-xyz" in (final.remote_path or "")
+
+
+def test_run_push_records_error_when_rm_cloud_raises(tmp_path, monkeypatch):
+    from arxiv2rm import rm_cloud
+    from arxiv2rm.daemon.jobs import Job
+
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+
+    def boom(*args, **kwargs):  # noqa: ARG001
+        raise RuntimeError("upload failed")
+
+    monkeypatch.setattr(rm_cloud, "upload_document", boom)
+    monkeypatch.setattr(jobs_mod, "JOBS_DIR", tmp_path / "jobs")
+    store = JobStore(directory=tmp_path / "jobs")
+    job = Job(id="j2", url="u", options={}, stage="converted", output_path=str(pdf))
+    store._jobs[job.id] = job
+    store._persist(job)
+
+    asyncio.run(server_mod._run_push(store, job, "/"))
+    final = store.get("j2")
+    assert final.stage == "error"
+    assert "upload failed" in (final.error or "")
 
 
 def test_parse_output_path_missing_marker():
