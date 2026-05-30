@@ -193,6 +193,15 @@ class LaTeXProcessor:
         Returns:
             Fixed LaTeX content that TexSoup can parse
         """
+        # Fix \$ (escaped dollar sign for literal $) - TexSoup misinterprets it as
+        # a math mode delimiter, causing "$ env expecting $" parse failures.
+        content = content.replace("\\$", "\\textdollar{}")
+
+        # Fix \{ and \} (escaped braces used in math) - TexSoup treats them as
+        # unmatched group delimiters, causing "Malformed argument" parse failures.
+        content = content.replace("\\{", "\\lbrace{}")
+        content = content.replace("\\}", "\\rbrace{}")
+
         # Fix possessive apostrophes after LaTeX commands (}'s pattern)
         # TexSoup can't parse \command{text}'s, so rewrite to \command{text's}
         # This handles patterns like \textsc{LLM-Guard}'s -> \textsc{LLM-Guard's}
@@ -251,6 +260,30 @@ class LaTeXProcessor:
             "",
             content,
         )
+
+        # Remove wrapfigure/wraptable environments - TexSoup misparses them because
+        # they take positional arguments like {r}{0.42\textwidth} that look like
+        # multiple arguments but confuse TexSoup's brace matching.
+        content = re.sub(
+            r"\\begin\{wrap(?:figure|table)\*?\}.*?\\end\{wrap(?:figure|table)\*?\}",
+            "",
+            content,
+            flags=re.DOTALL,
+        )
+
+        # Replace $$ display math delimiters with \begin{equation*}...\end{equation*}
+        # TexSoup sometimes misparses $$ as adjacent inline math delimiters.
+        content = re.sub(
+            r"\$\$(.*?)\$\$",
+            r"\\begin{equation*}\1\\end{equation*}",
+            content,
+            flags=re.DOTALL,
+        )
+
+        # Replace adjacent inline math expressions like $a$$b$ (common typos or
+        # shorthand $a$~$b$) that create ambiguous $$ sequences after substitutions.
+        # The pattern $X$$Y$ can confuse TexSoup; rewrite as $X$ $Y$.
+        content = re.sub(r"(\$[^$]+\$)\$", r"\1 $", content)
 
         return content
 
@@ -529,11 +562,20 @@ class LaTeXProcessor:
         """
         content = raw_content
 
+        # Protect \$ (escaped dollar signs) from being misread as math delimiters.
+        # Replace with a placeholder before any math processing, restore as $ after.
+        content = content.replace("\\$", "\x00DOLLAR\x00")
+
+        # Protect \{ and \} (escaped literal braces) from the brace-stripping step
+        # below, which would otherwise leave stray backslashes. Restored after stripping.
+        content = content.replace("\\{", "\x00LBRACE\x00")
+        content = content.replace("\\}", "\x00RBRACE\x00")
+
         # Remove figure environments entirely (they're extracted separately)
-        content = re.sub(r"\\begin\{figure\}.*?\\end\{figure\}", "", content, flags=re.DOTALL)
+        content = re.sub(r"\\begin\{figure\*?\}.*?\\end\{figure\*?\}", "", content, flags=re.DOTALL)
 
         # Remove table environments entirely (they're extracted separately)
-        content = re.sub(r"\\begin\{table\}.*?\\end\{table\}", "", content, flags=re.DOTALL)
+        content = re.sub(r"\\begin\{table\*?\}.*?\\end\{table\*?\}", "", content, flags=re.DOTALL)
 
         # Remove algorithm environments
         content = re.sub(r"\\begin\{algorithm\}.*?\\end\{algorithm\}", "", content, flags=re.DOTALL)
@@ -620,6 +662,15 @@ class LaTeXProcessor:
         content = re.sub(r"\\#", "#", content)
         content = re.sub(r"\\ldots", "...", content)
         content = re.sub(r"\\dots", "...", content)
+        # Restore \$ inserted by _fix_texsoup_incompatibilities as \textdollar{} for TexSoup
+        content = content.replace("\\textdollar{}", "$")
+        # Restore \{ and \} inserted as \lbrace{} / \rbrace{} for TexSoup. Route them
+        # through the same placeholders so they survive the brace-stripping step below.
+        content = content.replace("\\lbrace{}", "\x00LBRACE\x00")
+        content = content.replace("\\rbrace{}", "\x00RBRACE\x00")
+
+        # Restore escaped dollar signs (placed as placeholder at start of this function)
+        content = content.replace("\x00DOLLAR\x00", "$")
 
         # Remove any remaining LaTeX commands (but keep their content if in braces)
         content = re.sub(r"\\[a-zA-Z]+\*?\{([^}]*)\}", r"\1", content)
@@ -627,6 +678,10 @@ class LaTeXProcessor:
 
         # Clean up braces
         content = re.sub(r"[\{\}]", "", content)
+
+        # Restore escaped literal braces now that grouping braces have been removed.
+        content = content.replace("\x00LBRACE\x00", "{")
+        content = content.replace("\x00RBRACE\x00", "}")
 
         # Clean up whitespace
         content = re.sub(r"\n\s*\n\s*\n+", "\n\n", content)
@@ -1393,19 +1448,19 @@ class LaTeXProcessor:
 
         # Try as-is if it has an extension
         if any(image_path.lower().endswith(ext) for ext in self.IMAGE_EXTENSIONS):
-            # For PDF figures, prefer raster alternatives (PNG/JPG) since
-            # PDF images cannot be rendered directly by PIL/reportlab
+            candidate = self.latex_dir / image_path
             if image_path.lower().endswith(".pdf"):
+                # PDF images cannot be rendered directly by PIL/reportlab.
+                # Prefer raster alternatives (PNG/JPG), else convert PDF to PNG.
                 base_without_ext = image_path[:-4]
                 for alt_ext in [".png", ".jpg", ".jpeg"]:
                     alt_candidate = self.latex_dir / (base_without_ext + alt_ext)
                     if alt_candidate.exists():
                         return alt_candidate
-            # Fall back to converting PDF to PNG
-            candidate = self.latex_dir / image_path
-            if candidate.exists():
-                png = self._pdf_to_png(candidate)
-                return png
+                if candidate.exists():
+                    return self._pdf_to_png(candidate)
+            elif candidate.exists():
+                return candidate
 
         # Try adding extensions
         base_path = image_path
