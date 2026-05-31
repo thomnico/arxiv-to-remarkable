@@ -19,7 +19,11 @@ async function init() {
     }
   });
 
-  const allowed = /^https:\/\/arxiv\.org\/(abs|pdf)\//.test(url) || /\.pdf(\?|$)/i.test(url);
+  // Allow Send on any http/https URL: the daemon validates the response is a
+  // PDF (rejects with a clear error otherwise), so we don't need to guess from
+  // the URL alone. This covers publisher viewer URLs that don't end in .pdf
+  // and PDF URLs with #fragment anchors.
+  const allowed = /^https?:\/\//.test(url);
   $("send").disabled = !allowed;
 
   chrome.runtime.sendMessage({ type: "health" }, (resp) => {

@@ -3,7 +3,7 @@
 **Status**: Scaffolded (M0 done)
 **Owner**: Nicolas Thomas
 **Created**: 2026-04-29
-**Last updated**: 2026-05-22
+**Last updated**: 2026-05-31
 **Related**: [PRD.md](../PRD.md), [ADR-002-pdf-output-format.md](./ADR-002-pdf-output-format.md), [TASKS-chrome-extension.md](./TASKS-chrome-extension.md)
 
 ---
@@ -25,6 +25,9 @@ Solo researcher / engineer. Already has `arxiv2rm` + `rmapi` working locally. Re
 - Chrome MV3 extension, action button.
 - Auto-detect `arxiv.org/abs/*`, `arxiv.org/pdf/*`.
 - Right-click any `*.pdf` link → "Send to reMarkable".
+- Popup Send accepts any `http(s)://` URL (publisher viewers, fragment links,
+  PDF endpoints without `.pdf` suffix). The daemon validates the response is
+  a PDF (`%PDF` magic) and fails loudly otherwise.
 - One-click trigger: download → convert → upload.
 - Popup with stage + progress bar; OS notifications on done/error.
 - Options: daemon URL, bearer token, font size, device (`rm1|rm2|rmpro`), reMarkable folder.
