@@ -291,49 +291,58 @@ class RemarkableCloud:
 
         return (hash_val, int(generation), schema_version)
 
-    def _get_hash_raw(self, hash_val: str) -> bytes:
-        """Fetch raw bytes for a given hash."""
+    def _get_hash_raw(self, hash_val: str, file_name: str) -> bytes:
+        """Fetch raw bytes for a given hash.
+
+        The API requires an ``rm-filename`` header on GETs; rmapi-js uses the
+        logical file name (``"<id>.docSchema"`` for entry files, or the file's
+        full id like ``"<docid>.metadata"`` for leaf files).
+        """
         if not HASH_RE.match(hash_val):
             raise ValueError(f"Invalid hash: {hash_val}")
         resp = self._request(
-            "GET", f"{self._raw_host}/sync/v3/files/{hash_val}"
+            "GET",
+            f"{self._raw_host}/sync/v3/files/{hash_val}",
+            headers={"rm-filename": file_name},
         )
         return resp.content
 
-    def get_hash(self, hash_val: str) -> bytes:
+    def get_hash(self, hash_val: str, file_name: str) -> bytes:
         """Get binary data for a hash, with caching."""
         with self._cache_lock:
             cached = self._cache.get(hash_val)
         if cached is not None:
             return cached.encode("utf-8")
-        data = self._get_hash_raw(hash_val)
+        data = self._get_hash_raw(hash_val, file_name)
         with self._cache_lock:
             if hash_val not in self._cache:
                 self._cache[hash_val] = None
         return data
 
-    def get_buffer(self, hash_val: str) -> bytes:
+    def get_buffer(self, hash_val: str, file_name: str) -> bytes:
         """Get binary data for a hash (alias for get_hash)."""
-        return self.get_hash(hash_val)
+        return self.get_hash(hash_val, file_name)
 
-    def get_text(self, hash_val: str) -> str:
+    def get_text(self, hash_val: str, file_name: str) -> str:
         """Get text content for a hash, with full caching."""
         with self._cache_lock:
             cached = self._cache.get(hash_val)
         if cached is not None:
             return cached
-        data = self._get_hash_raw(hash_val)
+        data = self._get_hash_raw(hash_val, file_name)
         text = data.decode("utf-8")
         with self._cache_lock:
             self._cache[hash_val] = text
         return text
 
-    def get_entries(self, hash_val: str) -> Entries:
+    def get_entries(self, hash_val: str, file_name: str) -> Entries:
         """Parse and return entries for a given hash.
 
-        Works with both schema version 3 and 4.
+        Works with both schema version 3 and 4. ``file_name`` is the logical
+        name of the entries file (``"root.docSchema"`` for root, otherwise
+        ``"<entry_id>.docSchema"``).
         """
-        raw_file = self.get_text(hash_val)
+        raw_file = self.get_text(hash_val, file_name)
         lines = raw_file.rstrip("\n").split("\n")
         version = lines[0]
         rest = lines[1:]
@@ -624,14 +633,14 @@ def _get_entry_metadata(
 ) -> Optional[Dict[str, Any]]:
     """Fetch metadata for a single entry. Returns metadata dict or None."""
     try:
-        item_entries = api.get_entries(entry.hash)
+        item_entries = api.get_entries(entry.hash, f"{entry.id}.docSchema")
         meta_entry = next(
             (e for e in item_entries.entries
              if e.id.endswith(".metadata")),
             None,
         )
         if meta_entry:
-            text = api.get_text(meta_entry.hash)
+            text = api.get_text(meta_entry.hash, meta_entry.id)
             return json.loads(text)
     except Exception as e:
         _metadata_errors.append(str(e))
@@ -649,7 +658,7 @@ def _list_documents_remote(
     Uses 5 workers to avoid 429 rate limiting.
     """
     root_hash, _, _ = api.get_root_hash()
-    root_entries = api.get_entries(root_hash)
+    root_entries = api.get_entries(root_hash, "root.docSchema")
 
     documents: List[DocumentInfo] = []
 
@@ -778,7 +787,7 @@ def download_document(
     with _connect(device_token) as api:
         # Find the entry by ID in root
         root_hash, _, _ = api.get_root_hash()
-        root_entries = api.get_entries(root_hash)
+        root_entries = api.get_entries(root_hash, "root.docSchema")
 
         target_entry: Optional[RawEntry] = None
         for entry in root_entries.entries:
@@ -789,7 +798,9 @@ def download_document(
         if target_entry is None:
             raise RuntimeError(f"Document entry not found: {doc_name}")
 
-        item_entries = api.get_entries(target_entry.hash)
+        item_entries = api.get_entries(
+            target_entry.hash, f"{target_entry.id}.docSchema"
+        )
         out_path = Path(output_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -797,11 +808,11 @@ def download_document(
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for file_entry in item_entries.entries:
                 try:
-                    data = api.get_buffer(file_entry.hash)
+                    data = api.get_buffer(file_entry.hash, file_entry.id)
                     zf.writestr(file_entry.id, data)
                 except Exception:
                     try:
-                        text = api.get_text(file_entry.hash)
+                        text = api.get_text(file_entry.hash, file_entry.id)
                         zf.writestr(file_entry.id, text)
                     except Exception:
                         pass
@@ -869,7 +880,7 @@ def _upload_rmdoc(
         doc_id = content_file.replace(".content", "")
 
         root_hash, generation, schema_version = api.get_root_hash()
-        root_entries_obj = api.get_entries(root_hash)
+        root_entries_obj = api.get_entries(root_hash, "root.docSchema")
 
         existing_idx = next(
             (i for i, e in enumerate(root_entries_obj.entries)
