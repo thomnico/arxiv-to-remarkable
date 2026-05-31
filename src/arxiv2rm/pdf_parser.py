@@ -773,24 +773,40 @@ class PDFParser:
             page = doc[page_num]
             text = page.get_text()
 
-            # Find table markers - only match actual table captions with colon
-            # "Table N:" indicates a caption, while "Table N." or "Table N " is a reference
+            # Find table markers. Match common caption styles:
+            #   "Table 1: Title"      (arxiv / NeurIPS)
+            #   "Table 1. Title"      (some journals)
+            #   "TABLE I\nTITLE..."   (IEEE / conference templates, Roman numerals)
+            # The numeral can be Arabic or Roman. A title-case or all-caps word
+            # must follow (separator: colon, period, em-dash, or newline) — this
+            # filters out in-text references like "see Table 1".
             import re
 
-            table_pattern = re.compile(r"Table\s+(\d+):\s*[A-Z]")
+            table_pattern = re.compile(
+                r"\bTable\s+(\d+|[IVXLCDM]+)\b"
+                r"\s*(?:[:.–—]\s*|\n+\s*)[A-Z]",
+                re.IGNORECASE,
+            )
 
             for match in table_pattern.finditer(text):
-                table_num = int(match.group(1))
+                numeral = match.group(1)
+                key = numeral.upper()
 
                 # Skip if we already extracted this table number
-                if table_num in extracted_tables:
+                if key in extracted_tables:
                     continue
 
-                # Search for the exact table caption location (with colon)
-                text_instances = page.search_for(f"Table {table_num}:")
-                if not text_instances:
-                    # Try without colon as fallback
-                    text_instances = page.search_for(f"Table {table_num}")
+                # Search for the caption preserving the PDF's case. fitz's
+                # search_for is case-sensitive, so try the matched prefix first
+                # and fall back to common case variants.
+                matched_prefix = text[
+                    match.start() : match.start() + len("Table") + 1 + len(numeral)
+                ]
+                text_instances = (
+                    page.search_for(matched_prefix)
+                    or page.search_for(f"TABLE {key}")
+                    or page.search_for(f"Table {numeral}")
+                )
                 if not text_instances:
                     continue
 
@@ -873,21 +889,25 @@ class PDFParser:
                 pix = page.get_pixmap(matrix=mat, clip=clip)
 
                 # Save the image
-                img_name = f"table_{table_num}_p{page_num + 1}.png"
+                img_name = f"table_{key}_p{page_num + 1}.png"
                 img_path = output_dir / img_name
                 pix.save(str(img_path))
 
-                # Get caption text
-                caption_text = f"Table {table_num}"
-                # Try to extract full caption
-                caption_match = re.search(rf"Table\s+{table_num}[:\.]?\s*([^\n]+)", text)
+                # Get caption text. The caption may sit on the next line(s) and
+                # uses the same numeral (Arabic or Roman) as the marker.
+                caption_text = f"Table {numeral}"
+                caption_match = re.search(
+                    rf"Table\s+{re.escape(numeral)}\s*[:.\n–—]?\s*([^\n]+)",
+                    text,
+                    re.IGNORECASE,
+                )
                 if caption_match:
-                    caption_text = f"Table {table_num}: {caption_match.group(1).strip()}"
+                    caption_text = f"Table {numeral}: {caption_match.group(1).strip()}"
 
                 results.append(
                     {
                         "page": page_num + 1,
-                        "table_num": table_num,
+                        "table_num": key,
                         "caption": caption_text,
                         "img_path": img_path,
                         "bbox": (clip.x0, clip.y0, clip.x1, clip.y1),
@@ -897,8 +917,10 @@ class PDFParser:
                 )
 
                 # Mark this table as extracted to avoid duplicates
-                extracted_tables.add(table_num)
-                logger.info(f"Extracted table {table_num} from page {page_num + 1} as image")
+                extracted_tables.add(key)
+                logger.info(
+                    "Extracted table %s from page %s as image", numeral, page_num + 1
+                )
 
         doc.close()
         logger.info(f"Extracted {len(results)} table images")
