@@ -153,7 +153,7 @@ class TestReadabilityEvaluator:
         """Test initialization without API key."""
         evaluator = ReadabilityEvaluator(api_key=None)
         assert evaluator.api_key is None
-        assert evaluator.model == "claude-opus-4-5-20251101"
+        assert evaluator.model == "claude-opus-5-5"
 
     def test_init_with_api_key(self):
         """Test initialization with API key."""
@@ -162,8 +162,8 @@ class TestReadabilityEvaluator:
 
     def test_init_custom_model(self):
         """Test initialization with custom model."""
-        evaluator = ReadabilityEvaluator(api_key=None, model="claude-3-opus-20240229")
-        assert evaluator.model == "claude-3-opus-20240229"
+        evaluator = ReadabilityEvaluator(api_key=None, model="claude-sonnet-5-5")
+        assert evaluator.model == "claude-sonnet-5-5"
 
     def test_evaluate_file_not_found(self, evaluator, tmp_path):
         """Test evaluation with missing files."""

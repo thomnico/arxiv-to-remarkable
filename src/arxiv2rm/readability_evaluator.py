@@ -282,7 +282,7 @@ Respond in JSON format:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "claude-opus-4-5-20251101",
+        model: str = "claude-opus-5-5",
         cache_dir: Optional[Path] = None,
     ):
         """
@@ -618,8 +618,8 @@ Respond in JSON format:
             # Call API
             response = client.messages.create(
                 model=self.model,
-                max_tokens=1024,
-                effort="high",
+                max_tokens=16000,  # thinking is always on and counts toward max_tokens
+                output_config={"effort": "high"},
                 messages=[
                     {
                         "role": "user",
@@ -639,7 +639,8 @@ Respond in JSON format:
             )
 
             # Parse JSON response
-            response_text = response.content[0].text
+            # Thinking is always on: skip thinking blocks, read the text block
+            response_text = next(b.text for b in response.content if b.type == "text")
 
             # Extract JSON from response
             json_start = response_text.find("{")
