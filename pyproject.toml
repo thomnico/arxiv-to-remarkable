@@ -84,7 +84,7 @@ ocr = [
 ]
 
 eval = [
-    "anthropic>=0.39.0",  # Claude Vision API for quality evaluation
+    "anthropic>=2.8.0; python_version >= '3.10'",  # Claude Vision API for quality evaluation (output_config, claude-opus-5-5)
 ]
 
 daemon = [
